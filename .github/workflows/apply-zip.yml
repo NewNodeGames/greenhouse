@@ -1,0 +1,48 @@
+name: Apply uploaded zip
+
+# Unpacks cambios-fases1-2.zip (in the repository root) over the repository onto a new branch, then runs the CI (build + tests) on it.
+# Run it by hand from the Actions tab.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: Branch to create with the changes
+        default: multipista-fases-1-2
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Unpack the zip over the repository
+        run: |
+          set -e
+          zip_file=cambios-fases1-2.zip
+          unzip -q "$zip_file" -d /tmp/unpacked
+          source_dir=$(find /tmp/unpacked -mindepth 1 -maxdepth 1 -type d | head -n 1)
+          # Never overwrite the workflows or the submodules
+          rm -rf "$source_dir/.github" "$source_dir/external"
+          cp -a "$source_dir"/. ./
+          rm -f "$zip_file"
+
+      - name: Commit to a new branch
+        run: |
+          set -e
+          git config user.name "github-actions"
+          git config user.email "github-actions@users.noreply.github.com"
+          git checkout -b "${{ inputs.branch }}"
+          git add -A
+          git commit -m "Multitrack engine and arrangement project model"
+          git push --force origin "${{ inputs.branch }}"
+
+      - name: Run the CI on the new branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yml --ref "${{ inputs.branch }}"
