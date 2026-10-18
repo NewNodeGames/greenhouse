@@ -18,6 +18,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.androidaudioplugin.greenhouse.core.RackEngine
 import org.androidaudioplugin.greenhouse.device.DeviceInfo
 import org.androidaudioplugin.greenhouse.ui.host.AudioEngineController
 import org.androidaudioplugin.greenhouse.ui.host.MidiDeviceController
@@ -62,7 +63,7 @@ class HostViewModel(application: Application, config: HostConfig) : AndroidViewM
 
     private val sources = config.createSources(application, RackController.NUM_RACK_SLOTS)
 
-    val audio = AudioEngineController(RackController.NUM_RACK_SLOTS, postStatus)
+    val audio = AudioEngineController(RackEngine.DEFAULT_NUM_TRACKS, postStatus)
     val meters = RackMeters(RackController.NUM_RACK_SLOTS)
     val rack = RackController(sources, audio, viewModelScope, postStatus)
     val browser = PluginBrowserController(sources, viewModelScope, postStatus)

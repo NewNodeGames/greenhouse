@@ -145,11 +145,23 @@ SequencerSettings MidiSequencer::getSettings()
     return mSettings;
 }
 
-void MidiSequencer::startPlayback()
+void MidiSequencer::startPlayback(int64_t fromTick)
 {
     std::lock_guard<std::mutex> lock(mMutex);
     commitTakeLocked();
-    pushCommandLocked(Command::PLAY);
+    pushCommandLocked(Command::PLAY, std::max<int64_t>(0, fromTick));
+}
+
+void MidiSequencer::seek(int64_t tick)
+{
+    std::lock_guard<std::mutex> lock(mMutex);
+
+    // A recording follows the playhead from its start: moving it would break the take
+    if (mRecordingTake != NO_TAKE || getRequestedStateLocked() != TransportState::PLAYING) {
+        return;
+    }
+
+    pushCommandLocked(Command::SEEK, std::max<int64_t>(0, tick));
 }
 
 void MidiSequencer::startRecording()
@@ -340,7 +352,23 @@ void MidiSequencer::setEvents(std::vector<SequenceEvent> events, int32_t autoLen
 {
     std::lock_guard<std::mutex> lock(mMutex);
     stopLocked();
+    setEventsLocked(std::move(events), autoLengthBars);
+}
 
+bool MidiSequencer::replaceEvents(std::vector<SequenceEvent> events, int32_t autoLengthBars)
+{
+    std::lock_guard<std::mutex> lock(mMutex);
+
+    if (mRecordingTake != NO_TAKE) {
+        return false;
+    }
+
+    setEventsLocked(std::move(events), autoLengthBars);
+    return true;
+}
+
+void MidiSequencer::setEventsLocked(std::vector<SequenceEvent> events, int32_t autoLengthBars)
+{
     events.erase(std::remove_if(events.begin(), events.end(), [](const SequenceEvent& event) {
         return !isValidSlot(event.mSlot) || event.mTick < 0 || event.mPacket.mWordCount <= 0 ||
                event.mPacket.mWordCount != ump::getWordCount(event.mPacket.mWords[0]);
@@ -660,7 +688,7 @@ void MidiSequencer::eventsRemovedLocked()
     commitChangeLocked(true);
 }
 
-void MidiSequencer::pushCommandLocked(Command command)
+void MidiSequencer::pushCommandLocked(Command command, int64_t tick)
 {
     auto write = mCommandWrite.load(std::memory_order_relaxed);
 
@@ -670,6 +698,7 @@ void MidiSequencer::pushCommandLocked(Command command)
     }
 
     mCommands[write % TRANSPORT_COMMAND_CAPACITY] = command;
+    mCommandTicks[write % TRANSPORT_COMMAND_CAPACITY] = tick;
     mCommandWrite.store(write + 1, std::memory_order_release);
 
     switch (command) {
@@ -682,6 +711,8 @@ void MidiSequencer::pushCommandLocked(Command command)
             break;
         case Command::STOP:
             mRequestedState = TransportState::STOPPED;
+            break;
+        case Command::SEEK:
             break;
     }
 }
@@ -793,7 +824,7 @@ void MidiSequencer::processCommands()
     for (; read != write; read++) {
         switch (mCommands[read % TRANSPORT_COMMAND_CAPACITY]) {
             case Command::PLAY:
-                resetTransport(TransportState::PLAYING);
+                resetTransport(TransportState::PLAYING, mCommandTicks[read % TRANSPORT_COMMAND_CAPACITY]);
                 break;
             case Command::ARM:
                 resetTransport(TransportState::ARMED);
@@ -801,6 +832,15 @@ void MidiSequencer::processCommands()
             case Command::ROLL:
                 if (mState == TransportState::ARMED) {
                     mState = TransportState::PLAYING;
+                }
+
+                break;
+            case Command::SEEK:
+                if (mState == TransportState::PLAYING) {
+                    // A new pass: what an earlier recording played in this one is heard again
+                    releaseHeldNotes();
+                    mPositionFrames = tickToFrame(mCommandTicks[read % TRANSPORT_COMMAND_CAPACITY]);
+                    mPass++;
                 }
 
                 break;
@@ -813,12 +853,12 @@ void MidiSequencer::processCommands()
     mCommandRead.store(read, std::memory_order_release);
 }
 
-/** Moves to state at the start of the sequence, releasing the notes held. */
-void MidiSequencer::resetTransport(TransportState state)
+/** Moves to state at startTick of the sequence, releasing the notes held. */
+void MidiSequencer::resetTransport(TransportState state, int64_t startTick)
 {
     releaseHeldNotes();
     mState = state;
-    mPositionFrames = 0;
+    mPositionFrames = startTick > 0 ? tickToFrame(startTick) : 0;
     mPass = 0;
 }
 
