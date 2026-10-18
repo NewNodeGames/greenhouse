@@ -91,13 +91,13 @@ public:
         mSequencer.setSettings(settings);
     }
 
-    void send(const ump::Packet& packet)
+    void send(const ump::Packet& packet, int32_t track = 0)
     {
-        mSequencer.recordInput(0, reinterpret_cast<const uint8_t*>(packet.mWords.data()), packet.mWordCount * ump::BYTES_PER_WORD);
+        mSequencer.recordInput(track, reinterpret_cast<const uint8_t*>(packet.mWords.data()), packet.mWordCount * ump::BYTES_PER_WORD);
     }
 
-    /** Renders blocks, polling the status as the UI does (it publishes what was recorded). */
-    std::vector<Played> run(int32_t blocks)
+    /** Renders blocks, polling the status as the UI does (it publishes what was recorded). Returns what a track's instrument plays. */
+    std::vector<Played> run(int32_t blocks, int32_t track = 0)
     {
         std::vector<Played> played;
         std::vector<float> audio(BLOCK_FRAMES * STEREO_CHANNEL_COUNT);
@@ -105,7 +105,7 @@ public:
         for (int32_t block = 0; block < blocks; block++) {
             mSequencer.getStatus();
             mSequencer.beginBlock(BLOCK_FRAMES, SAMPLE_RATE);
-            readSlotEvents(played);
+            readSlotEvents(played, track);
             mSequencer.renderMetronome(audio.data(), BLOCK_FRAMES);
             mFrame += BLOCK_FRAMES;
         }
@@ -119,10 +119,10 @@ public:
         return run(static_cast<int32_t>(frames / BLOCK_FRAMES));
     }
 
-    void readSlotEvents(std::vector<Played>& played) const
+    void readSlotEvents(std::vector<Played>& played, int32_t track = 0) const
     {
         int32_t wordCount = 0;
-        auto words = mSequencer.getSlotEvents(0, wordCount);
+        auto words = mSequencer.getSlotEvents(track, wordCount);
         uint32_t jrTicks = 0;
 
         for (int32_t i = 0; i < wordCount; i += ump::getWordCount(words[i])) {
@@ -553,6 +553,159 @@ void testUndoingEveryTakeWhileRecordingInAuto()
     CHECK(sequencer.getStatus().mLengthTicks > BAR);
 }
 
+SequenceEvent trackEvent(int64_t tick, int32_t track, const ump::Packet& packet, int32_t take = 0)
+{
+    return SequenceEvent{tick, track, take, 0, packet};
+}
+
+void testStartPlaybackFromTick()
+{
+    Harness harness(4);
+    auto& sequencer = harness.mSequencer;
+    sequencer.setEvents({event(0, noteOn(60)), event(BEAT, noteOff(60)),
+                         event(2 * BAR, noteOn(62)), event(2 * BAR + BEAT, noteOff(62))}, 4);
+    sequencer.startPlayback(2 * BAR);
+    auto played = harness.run(1);
+
+    // It starts at bar 3: the first note is behind it and the second plays at once
+    CHECK(countNoteOns(played) == 1);
+    CHECK(!played.empty() && ump::getNote(played[0].mWord0) == 62);
+    CHECK(sequencer.getPositionTick() >= 2 * BAR && sequencer.getPositionTick() < 2 * BAR + BEAT);
+}
+
+void testSeek()
+{
+    Harness harness(4);
+    auto& sequencer = harness.mSequencer;
+    sequencer.setEvents({event(0, noteOn(60)), event(BEAT, noteOff(60)),
+                         event(2 * BAR, noteOn(62)), event(2 * BAR + BEAT, noteOff(62))}, 4);
+
+    // Stopped: there is no playhead to move
+    sequencer.seek(BAR);
+    harness.run(1);
+    CHECK(sequencer.getStatus().mState == TransportState::STOPPED);
+    CHECK(sequencer.getPositionTick() == 0);
+
+    sequencer.startPlayback();
+    CHECK(countNoteOns(harness.run(1)) == 1);
+
+    sequencer.seek(2 * BAR);
+    auto played = harness.run(1);
+    CHECK(sequencer.getStatus().mState == TransportState::PLAYING);
+    CHECK(sequencer.getPositionTick() >= 2 * BAR && sequencer.getPositionTick() < 2 * BAR + BEAT);
+    // The note held when it jumped ends, then the note at bar 3 starts
+    CHECK(played.size() == 2);
+    CHECK(played.size() == 2 && !isNoteOn(played[0].mWord0) && ump::getNote(played[0].mWord0) == 60);
+    CHECK(played.size() == 2 && isNoteOn(played[1].mWord0) && ump::getNote(played[1].mWord0) == 62);
+}
+
+void testReplaceEventsWhilePlaying()
+{
+    Harness harness(1);
+    auto& sequencer = harness.mSequencer;
+    // A note held for most of the bar
+    sequencer.setEvents({event(0, noteOn(60)), event(BAR - BEAT, noteOff(60))}, 1);
+    sequencer.startPlayback();
+    harness.runTicks(BAR / 2);
+    auto position = sequencer.getPositionTick();
+    auto revision = sequencer.getStatus().mRevision;
+
+    CHECK(sequencer.replaceEvents({event(3 * BAR / 4, noteOn(64)), event(3 * BAR / 4 + BEAT / 2, noteOff(64))}, 1));
+    CHECK(sequencer.getStatus().mRevision != revision);
+    CHECK(sequencer.getStatus().mState == TransportState::PLAYING);
+    CHECK(sequencer.getEvents().size() == 2);
+
+    // The edit ends the note it cut off, and the transport carries on from where it was
+    auto played = harness.run(1);
+    CHECK(played.size() == 1 && !isNoteOn(played[0].mWord0) && ump::getNote(played[0].mWord0) == 60);
+    CHECK(sequencer.getPositionTick() > position);
+
+    auto rest = harness.runTicks(BAR / 2);
+    CHECK(countNoteOns(rest) == 1);
+}
+
+void testReplaceEventsIsRefusedWhileRecording()
+{
+    Harness harness(1);
+    auto& sequencer = harness.mSequencer;
+    sequencer.setEvents({event(0, noteOn(60)), event(BEAT, noteOff(60))}, 1);
+    sequencer.startRecording();
+    harness.run(1);
+
+    CHECK(!sequencer.replaceEvents({}, 1));
+    CHECK(sequencer.getEvents().size() == 2);
+
+    sequencer.stopRecording();
+    CHECK(sequencer.replaceEvents({}, 1));
+    CHECK(sequencer.getEvents().empty());
+}
+
+void testTracksPlayTheirOwnEvents()
+{
+    constexpr int32_t DRUMS = 0;
+    constexpr int32_t BASS = 3;
+    constexpr int32_t UNUSED = 5;
+    Harness harness(1);
+    auto& sequencer = harness.mSequencer;
+    sequencer.setEvents({trackEvent(0, DRUMS, noteOn(36)), trackEvent(BEAT, DRUMS, noteOff(36)),
+                         trackEvent(0, BASS, noteOn(40)), trackEvent(BEAT, BASS, noteOff(40)),
+                         trackEvent(BEAT, BASS, noteOn(43)), trackEvent(2 * BEAT, BASS, noteOff(43))}, 1);
+    sequencer.startPlayback();
+
+    // The tracks share the transport: render the same blocks and read each track's events
+    std::vector<Harness::Played> drums;
+    std::vector<Harness::Played> bass;
+    std::vector<Harness::Played> unused;
+    std::vector<float> audio(BLOCK_FRAMES * STEREO_CHANNEL_COUNT);
+    auto blocks = static_cast<int32_t>(ticksToFrames(BAR) / BLOCK_FRAMES);
+
+    for (int32_t block = 0; block < blocks; block++) {
+        sequencer.getStatus();
+        sequencer.beginBlock(BLOCK_FRAMES, SAMPLE_RATE);
+        harness.readSlotEvents(drums, DRUMS);
+        harness.readSlotEvents(bass, BASS);
+        harness.readSlotEvents(unused, UNUSED);
+        sequencer.renderMetronome(audio.data(), BLOCK_FRAMES);
+        harness.mFrame += BLOCK_FRAMES;
+    }
+
+    CHECK(countNoteOns(drums) == 1 && drums.size() == 2);
+    CHECK(countNoteOns(bass) == 2 && bass.size() == 4);
+    CHECK(unused.empty());
+
+    for (const auto& played : drums) {
+        CHECK(ump::getNote(played.mWord0) == 36);
+    }
+}
+
+void testRecordsEveryTrack()
+{
+    Harness harness(AUTO_LENGTH_BARS);
+    auto& sequencer = harness.mSequencer;
+    sequencer.startRecording();
+    harness.run(1);
+
+    harness.send(noteOn(60), 0);
+    harness.run(1);
+    harness.send(noteOn(64), 2);
+    harness.runTicks(BEAT);
+    harness.send(noteOff(60), 0);
+    harness.send(noteOff(64), 2);
+    // A track the rack does not have is not recorded
+    harness.send(noteOn(70), MAX_SEQUENCER_SLOTS);
+    sequencer.stopRecording();
+
+    auto events = sequencer.getEvents();
+    std::map<int32_t, int32_t> perTrack;
+
+    for (const auto& recorded : events) {
+        perTrack[recorded.mSlot]++;
+    }
+
+    CHECK(events.size() == 4);
+    CHECK(perTrack.size() == 2 && perTrack[0] == 2 && perTrack[2] == 2);
+}
+
 void testStandardMidiFile()
 {
     constexpr double FILE_BPM = 97.0;
@@ -628,6 +781,12 @@ int main()
     testPhrases();
     testUndoingEveryTakeWhileRecordingInAuto();
     testStandardMidiFile();
+    testStartPlaybackFromTick();
+    testSeek();
+    testReplaceEventsWhilePlaying();
+    testReplaceEventsIsRefusedWhileRecording();
+    testTracksPlayTheirOwnEvents();
+    testRecordsEveryTrack();
 
     if (gFailures > 0) {
         std::printf("%d failure(s)\n", gFailures);

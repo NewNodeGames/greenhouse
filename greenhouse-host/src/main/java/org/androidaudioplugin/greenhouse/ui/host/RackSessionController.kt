@@ -15,6 +15,8 @@ import org.androidaudioplugin.greenhouse.data.RackPreset
 import org.androidaudioplugin.greenhouse.data.RackPresetHeader
 import org.androidaudioplugin.greenhouse.data.RackSessionManager
 import org.androidaudioplugin.greenhouse.data.SlotPlacement
+import org.androidaudioplugin.greenhouse.project.Project
+import org.androidaudioplugin.greenhouse.project.resolveProject
 import java.io.File
 
 /** Saved sessions on disk, the currently open session, autosave, and restoring a session into the rack. */
@@ -24,6 +26,7 @@ class RackSessionController(
     private val audio: AudioEngineController,
     private val browser: PluginBrowserController,
     private val sequencer: SequencerController,
+    private val arrangement: ProjectController,
     private val scope: CoroutineScope,
     private val postStatus: (String) -> Unit
 ) {
@@ -55,9 +58,9 @@ class RackSessionController(
     /** [currentRevision] when the session was last saved or loaded. */
     private var savedRevision by mutableIntStateOf(currentRevision())
 
-    /** The rack or the sequence changed since the session was last saved or loaded. */
+    /** The rack, the sequence or the arrangement changed since the session was last saved or loaded. */
     val isModified: Boolean
-        get() = rack.revision + sequencer.status.revision != savedRevision
+        get() = rack.revision + sequencer.status.revision + arrangement.revision != savedRevision
 
     fun refreshSavedSessions() {
         scope.launch(Dispatchers.IO) {
@@ -214,6 +217,7 @@ class RackSessionController(
         currentSessionName = null
         currentSessionFile = null
         sequencer.restore(null)
+        arrangement.load(Project())
         savedRevision = currentRevision()
         sessionManager.clearAutosession()
         postStatus("New session started.")
@@ -277,12 +281,18 @@ class RackSessionController(
     }
 
     private fun capture(name: String): RackPreset {
-        return RackPreset(name = name, slots = rack.captureSlotStates(), sequence = sequencer.captureState())
+        // The sequence is saved too, with the song as flattened events, for the versions that only know that
+        return RackPreset(
+            name = name,
+            slots = rack.captureSlotStates(),
+            sequence = sequencer.captureState(),
+            project = arrangement.project
+        )
     }
 
-    /** Changes whenever the rack or the sequence changes: both revisions only grow. Reads the sequencer's current one. */
+    /** Changes whenever the rack, the sequence or the arrangement changes: the revisions only grow. Reads the sequencer's current one. */
     private fun currentRevision(): Int {
-        return rack.revision + sequencer.currentRevision()
+        return rack.revision + sequencer.currentRevision() + arrangement.revision
     }
 
     /**
@@ -314,6 +324,8 @@ class RackSessionController(
             rack.restoreHostSettings(savedSlots)
 
             sequencer.restore(preset.sequence)
+            // The song the session saved, or the one its sequence makes if it was saved before there were songs
+            arrangement.load(preset.resolveProject())
 
             var anyError = false
 

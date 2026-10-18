@@ -25,15 +25,17 @@ import org.androidaudioplugin.greenhouse.device.DeviceInfo
 import org.androidaudioplugin.greenhouse.device.SavedDeviceState
 import org.androidaudioplugin.greenhouse.device.SlotDevice
 import org.androidaudioplugin.greenhouse.device.SlotDeviceSource
+import org.androidaudioplugin.greenhouse.core.RackEngine
 import org.androidaudioplugin.greenhouse.ui.RackSlotData
 import org.androidaudioplugin.greenhouse.ui.SlotUiState
 import org.androidaudioplugin.greenhouse.ui.StudioRackViewMode
 import kotlin.math.abs
 
 /**
- * The rack's slots (slot 0: instrument, slots 1..N-1: effects): device lifecycle per slot (AAP
- * plugins or devices from the app's other sources), parameter / preset edits, and which slot and view
- * the rack is showing.
+ * The rack's slots, as many as the engine has: its tracks in turn, each with its instrument in the first
+ * slot and its effects in the next ones (see `RackEngine`). Device lifecycle per slot (AAP plugins or
+ * devices from the app's other sources), parameter / preset edits, and which slot and view the rack is
+ * showing.
  */
 class RackController(
     sources: List<SlotDeviceSource>,
@@ -43,7 +45,6 @@ class RackController(
 ) {
     companion object {
         private const val TAG = "RackController"
-        const val NUM_RACK_SLOTS = 3
         const val INSTRUMENT_SLOT_INDEX = 0
         const val NO_PRESET_SELECTED = -1
         // AAP plugins report host edits back right away (see SlotDevice.onHostParameterChange()); this
@@ -54,9 +55,12 @@ class RackController(
 
     private val sources = sources.associateBy { it.id }
 
+    /** Every slot of the engine's rack. */
+    val numSlots = audio.engine.numSlots
+
     val slots = mutableStateListOf<RackSlotData>().apply {
-        for (i in 0 until NUM_RACK_SLOTS) {
-            val slotType = if (i == INSTRUMENT_SLOT_INDEX) {
+        for (i in 0 until numSlots) {
+            val slotType = if (RackEngine.isInstrumentSlot(i)) {
                 SlotType.INSTRUMENT
             } else {
                 SlotType.EFFECT
@@ -66,7 +70,7 @@ class RackController(
         }
     }
 
-    val slotUi = List(NUM_RACK_SLOTS) { SlotUiState() }
+    val slotUi = List(numSlots) { SlotUiState() }
 
     /** Role of each slot, in rack order. */
     val slotTypes: List<String>
@@ -78,10 +82,10 @@ class RackController(
     val loadErrors: Flow<String> = loadErrorEvents.receiveAsFlow()
 
     /** Serializes preset changes per slot so they reach the plugin in tap order. */
-    private val presetLocks = List(NUM_RACK_SLOTS) { Mutex() }
+    private val presetLocks = List(numSlots) { Mutex() }
 
     /** Latest preset request per slot; read-backs from superseded requests are dropped. */
-    private val presetRequestIds = IntArray(NUM_RACK_SLOTS)
+    private val presetRequestIds = IntArray(numSlots)
 
     var activeSlotIndex by mutableIntStateOf(INSTRUMENT_SLOT_INDEX)
         private set
@@ -103,7 +107,7 @@ class RackController(
         get() = slots.all { it.device == null }
 
     fun isValidSlot(slotIndex: Int): Boolean {
-        return slotIndex in 0 until NUM_RACK_SLOTS
+        return slotIndex in 0 until numSlots
     }
 
     /** Whether a loaded device has to be created again to play at [sampleRate]. */
@@ -289,7 +293,7 @@ class RackController(
 
     /** Empties every slot and puts its host level and mix back to where a new slot starts. */
     fun unloadAll() {
-        for (i in 0 until NUM_RACK_SLOTS) {
+        for (i in 0 until numSlots) {
             unloadSlot(i)
             applyHostSettings(i, SlotHostSettings.DEFAULT_LEVEL_DB, SlotHostSettings.INITIAL_MIX)
         }

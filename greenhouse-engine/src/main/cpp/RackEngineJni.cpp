@@ -9,9 +9,9 @@ extern "C" {
 
 JNIEXPORT void JNICALL
 Java_org_androidaudioplugin_greenhouse_core_RackEngine_nativeConfigure(
-        JNIEnv* env, jclass clazz, jint framesPerCallback, jint numSlots)
+        JNIEnv* env, jclass clazz, jint framesPerCallback, jint numTracks)
 {
-    getEngine().configure(framesPerCallback, numSlots);
+    getEngine().configure(framesPerCallback, numTracks);
 }
 
 JNIEXPORT void JNICALL
@@ -128,6 +128,27 @@ Java_org_androidaudioplugin_greenhouse_core_RackEngine_nativeSetSlotMix(
 }
 
 JNIEXPORT void JNICALL
+Java_org_androidaudioplugin_greenhouse_core_RackEngine_nativeSetTrackGain(
+        JNIEnv* env, jclass clazz, jint trackIndex, jfloat gain)
+{
+    getEngine().setTrackGain(trackIndex, gain);
+}
+
+JNIEXPORT void JNICALL
+Java_org_androidaudioplugin_greenhouse_core_RackEngine_nativeSetTrackMuted(
+        JNIEnv* env, jclass clazz, jint trackIndex, jboolean muted)
+{
+    getEngine().setTrackMuted(trackIndex, muted == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
+Java_org_androidaudioplugin_greenhouse_core_RackEngine_nativeSetTrackSoloed(
+        JNIEnv* env, jclass clazz, jint trackIndex, jboolean soloed)
+{
+    getEngine().setTrackSoloed(trackIndex, soloed == JNI_TRUE);
+}
+
+JNIEXPORT void JNICALL
 Java_org_androidaudioplugin_greenhouse_core_RackEngine_nativeSendUmp(
         JNIEnv* env, jclass clazz, jint slotIndex, jbyteArray data, jint length)
 {
@@ -195,6 +216,44 @@ Java_org_androidaudioplugin_greenhouse_core_RackEngine_nativeGetAllSlotLevels(
 
     getEngine().getAllSlotLevels(levels, slotCount);
     env->ReleasePrimitiveArrayCritical(outLevels, levels, 0);
+}
+
+JNIEXPORT void JNICALL
+Java_org_androidaudioplugin_greenhouse_core_RackEngine_nativeGetTrackLevels(
+        JNIEnv* env, jclass clazz, jfloatArray outLevels)
+{
+    if (outLevels == nullptr) {
+        return;
+    }
+
+    auto trackCount = env->GetArrayLength(outLevels) / greenhouse::STEREO_CHANNEL_COUNT;
+
+    if (trackCount <= 0) {
+        return;
+    }
+
+    // Lock-free atomic reads only, so a critical section is fine here
+    auto levels = static_cast<jfloat*>(env->GetPrimitiveArrayCritical(outLevels, nullptr));
+
+    if (levels == nullptr) {
+        return;
+    }
+
+    getEngine().getTrackLevels(levels, trackCount);
+    env->ReleasePrimitiveArrayCritical(outLevels, levels, 0);
+}
+
+JNIEXPORT void JNICALL
+Java_org_androidaudioplugin_greenhouse_core_RackEngine_nativeGetMasterLevels(
+        JNIEnv* env, jclass clazz, jfloatArray outLevels)
+{
+    if (outLevels == nullptr || env->GetArrayLength(outLevels) < greenhouse::STEREO_CHANNEL_COUNT) {
+        return;
+    }
+
+    float levels[greenhouse::STEREO_CHANNEL_COUNT];
+    getEngine().getMasterLevels(levels);
+    env->SetFloatArrayRegion(outLevels, 0, greenhouse::STEREO_CHANNEL_COUNT, levels);
 }
 
 JNIEXPORT jint JNICALL
