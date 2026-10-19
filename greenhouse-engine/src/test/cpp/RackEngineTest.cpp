@@ -5,6 +5,7 @@
 #include "slot/SlotEvents.h"
 #include <cmath>
 #include <cstdio>
+#include <array>
 #include <cstdlib>
 #include <limits>
 #include <vector>
@@ -14,7 +15,10 @@ using namespace greenhouse;
 namespace
 {
 
-constexpr int32_t SLOT_COUNT = 3;
+constexpr int32_t TRACK_COUNT = 1;
+constexpr int32_t TWO_TRACKS = 2;
+constexpr int32_t SECOND_TRACK = 1;
+constexpr float QUARTER_GAIN = 0.25f;
 constexpr int32_t EFFECT_SLOT_INDEX = 1;
 constexpr int32_t BLOCK_FRAMES = 64;
 // Not a multiple of BLOCK_FRAMES: blocks are rendered independently of the callback size
@@ -186,9 +190,9 @@ private:
 class Rack
 {
 public:
-    Rack()
+    explicit Rack(int32_t trackCount = TRACK_COUNT)
     {
-        mEngine.configure(BLOCK_FRAMES, SLOT_COUNT);
+        mEngine.configure(BLOCK_FRAMES, trackCount);
     }
 
     ~Rack()
@@ -218,6 +222,16 @@ public:
     void renderSettled()
     {
         render();
+        render();
+    }
+
+    /**
+     * Renders until a ramp that started at the next block is over, and its tail is out of the callback: a block
+     * is not a multiple of the callback, so the ramp's end can fall in the next callback too.
+     */
+    void renderRamped()
+    {
+        renderSettled();
         render();
     }
 
@@ -422,6 +436,214 @@ void testSequencerEvents()
     CHECK(instrument.mNoteOffs == 1);
 }
 
+void testFourEffectsInSerial()
+{
+    Trace instrument;
+    std::array<Trace, EFFECT_SLOTS_PER_TRACK> effects;
+    Rack rack;
+    rack.setSlot(INSTRUMENT_SLOT_INDEX, instrument, 0, STEREO_CHANNEL_COUNT);
+
+    for (int32_t i = 0; i < EFFECT_SLOTS_PER_TRACK; i++) {
+        rack.setSlot(INSTRUMENT_SLOT_INDEX + 1 + i, effects[i], STEREO_CHANNEL_COUNT, STEREO_CHANNEL_COUNT, EFFECT_GAIN);
+    }
+
+    rack.mEngine.startStreaming();
+    rack.render();
+
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL * std::pow(EFFECT_GAIN, static_cast<float>(EFFECT_SLOTS_PER_TRACK))));
+
+    for (const auto& effect : effects) {
+        CHECK(effect.mProcessCalls == 2);
+    }
+}
+
+void testTracksAreSummed()
+{
+    Trace firstInstrument;
+    Trace firstEffect;
+    Trace secondInstrument;
+    Rack rack(TWO_TRACKS);
+    rack.setSlot(getInstrumentSlotOfTrack(0), firstInstrument, 0, STEREO_CHANNEL_COUNT);
+    rack.setSlot(getInstrumentSlotOfTrack(0) + 1, firstEffect, STEREO_CHANNEL_COUNT, STEREO_CHANNEL_COUNT, EFFECT_GAIN);
+    rack.setSlot(getInstrumentSlotOfTrack(SECOND_TRACK), secondInstrument, 0, STEREO_CHANNEL_COUNT);
+    rack.mEngine.startStreaming();
+    rack.render();
+
+    // The first track's effect only processes its own track: the second one joins at the master
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL * EFFECT_GAIN + SOURCE_LEVEL));
+    CHECK(firstEffect.mProcessCalls == 2);
+    CHECK(secondInstrument.mProcessCalls == 2);
+}
+
+void testTrackGainMuteAndSolo()
+{
+    Trace first;
+    Trace second;
+    Rack rack(TWO_TRACKS);
+    rack.setSlot(getInstrumentSlotOfTrack(0), first, 0, STEREO_CHANNEL_COUNT);
+    rack.setSlot(getInstrumentSlotOfTrack(SECOND_TRACK), second, 0, STEREO_CHANNEL_COUNT);
+    rack.mEngine.startStreaming();
+    rack.renderRamped();
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL * 2));
+
+    // Changes ramp over a block, then hold
+    rack.mEngine.setTrackGain(SECOND_TRACK, HALF_GAIN);
+    rack.renderRamped();
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL + SOURCE_LEVEL * HALF_GAIN));
+
+    rack.mEngine.setTrackMuted(0, true);
+    rack.renderRamped();
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL * HALF_GAIN));
+
+    // A muted track still runs: its plugins keep their state
+    auto callsWhileMuted = first.mProcessCalls;
+    rack.render();
+    CHECK(first.mProcessCalls > callsWhileMuted);
+
+    rack.mEngine.setTrackMuted(0, false);
+    rack.mEngine.setTrackSoloed(0, true);
+    rack.renderRamped();
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL));
+
+    // Several tracks can be soloed; a muted one stays silent even soloed
+    rack.mEngine.setTrackSoloed(SECOND_TRACK, true);
+    rack.renderRamped();
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL + SOURCE_LEVEL * HALF_GAIN));
+
+    rack.mEngine.setTrackMuted(0, true);
+    rack.renderRamped();
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL * HALF_GAIN));
+
+    // Nothing soloed any more: every track not muted is heard again
+    rack.mEngine.setTrackMuted(0, false);
+    rack.mEngine.setTrackSoloed(0, false);
+    rack.mEngine.setTrackSoloed(SECOND_TRACK, false);
+    rack.renderRamped();
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL + SOURCE_LEVEL * HALF_GAIN));
+}
+
+void testTrackLevels()
+{
+    Trace first;
+    Trace second;
+    Rack rack(TWO_TRACKS);
+    rack.setSlot(getInstrumentSlotOfTrack(0), first, 0, STEREO_CHANNEL_COUNT);
+    rack.setSlot(getInstrumentSlotOfTrack(SECOND_TRACK), second, 0, STEREO_CHANNEL_COUNT);
+    rack.mEngine.setTrackGain(SECOND_TRACK, HALF_GAIN);
+    rack.mEngine.startStreaming();
+    rack.renderRamped();
+
+    std::array<float, TWO_TRACKS * STEREO_CHANNEL_COUNT> levels{};
+    std::array<float, STEREO_CHANNEL_COUNT> master{};
+    rack.mEngine.getTrackLevels(levels.data(), TWO_TRACKS);
+    rack.mEngine.getMasterLevels(master.data());
+
+    // The tracks' levels are in the mix: after their gain
+    CHECK(std::fabs(levels[0] - SOURCE_LEVEL) < TOLERANCE && std::fabs(levels[1] - SOURCE_LEVEL) < TOLERANCE);
+    CHECK(std::fabs(levels[2] - SOURCE_LEVEL * HALF_GAIN) < TOLERANCE);
+    CHECK(std::fabs(master[0] - (SOURCE_LEVEL + SOURCE_LEVEL * HALF_GAIN)) < TOLERANCE);
+
+    rack.mEngine.setTrackMuted(SECOND_TRACK, true);
+
+    for (auto i = 0; i < 40; i++) {
+        rack.render();
+    }
+
+    // A muted track's meter falls to nothing
+    rack.mEngine.getTrackLevels(levels.data(), TWO_TRACKS);
+    CHECK(levels[2] == 0.0f && levels[0] > 0.0f);
+}
+
+void testEmptyTracksAndLimits()
+{
+    Trace instrument;
+    Rack rack(TWO_TRACKS);
+    CHECK(rack.mEngine.getNumTracks() == TWO_TRACKS);
+
+    // Only the second track makes sound: the first one is empty
+    rack.setSlot(getInstrumentSlotOfTrack(SECOND_TRACK), instrument, 0, STEREO_CHANNEL_COUNT);
+    rack.mEngine.startStreaming();
+    rack.render();
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL));
+
+    // Slots and tracks past the rack are ignored
+    Trace stray;
+    rack.setSlot(TWO_TRACKS * SLOTS_PER_TRACK, stray, 0, STEREO_CHANNEL_COUNT);
+    rack.mEngine.setTrackMuted(TWO_TRACKS, true);
+    rack.mEngine.setTrackGain(-1, 0.0f);
+    rack.render();
+    CHECK(stray.mProcessCalls == 0);
+    CHECK(rack.lastOutputIs(SOURCE_LEVEL));
+
+    Rack large(MAX_TRACKS + 1);
+    CHECK(large.mEngine.getNumTracks() == MAX_TRACKS);
+}
+
+void testSequencerPlaysEachTrackInstrument()
+{
+    Trace firstInstrument;
+    Trace firstEffect;
+    Trace secondInstrument;
+    Rack rack(TWO_TRACKS);
+    rack.setSlot(getInstrumentSlotOfTrack(0), firstInstrument, 0, STEREO_CHANNEL_COUNT);
+    rack.setSlot(getInstrumentSlotOfTrack(0) + 1, firstEffect, STEREO_CHANNEL_COUNT, STEREO_CHANNEL_COUNT);
+    rack.setSlot(getInstrumentSlotOfTrack(SECOND_TRACK), secondInstrument, 0, STEREO_CHANNEL_COUNT);
+
+    ump::Packet noteOn;
+    noteOn.mWords[0] = MIDI2_NOTE_ON | (TEST_NOTE << ump::NOTE_SHIFT);
+    noteOn.mWords[1] = FULL_VELOCITY;
+    noteOn.mWordCount = ump::getWordCount(noteOn.mWords[0]);
+    auto noteOff = noteOn;
+    noteOff.mWords[0] = MIDI2_NOTE_OFF | (TEST_NOTE << ump::NOTE_SHIFT);
+
+    // Track 2 plays two notes, track 1 one
+    auto& sequencer = rack.mEngine.getSequencer();
+    sequencer.setEvents({SequenceEvent{0, 0, 0, 0, noteOn}, SequenceEvent{NOTE_LENGTH_TICKS, 0, 0, 0, noteOff},
+                         SequenceEvent{0, SECOND_TRACK, 0, 0, noteOn}, SequenceEvent{NOTE_LENGTH_TICKS / 2, SECOND_TRACK, 0, 0, noteOff},
+                         SequenceEvent{NOTE_LENGTH_TICKS, SECOND_TRACK, 0, 0, noteOn}}, LOOP_BARS);
+    rack.mEngine.startStreaming();
+    sequencer.startPlayback();
+    rack.render();
+
+    CHECK(firstInstrument.mNoteOns == 1);
+    CHECK(secondInstrument.mNoteOns == 1);
+    // The effects of a track do not get the sequencer's notes
+    CHECK(firstEffect.mNoteOns == 0 && firstEffect.mNoteOffs == 0);
+
+    // Bypassing a track's instrument ends only its notes
+    rack.mEngine.setSlotBypassed(getInstrumentSlotOfTrack(SECOND_TRACK), true);
+    rack.render();
+    CHECK(secondInstrument.mNoteOffs == 1 && firstInstrument.mNoteOffs == 0);
+}
+
+void testRecordsLiveNotesUnderTheirTrack()
+{
+    Trace firstInstrument;
+    Trace firstEffect;
+    Trace secondInstrument;
+    Rack rack(TWO_TRACKS);
+    rack.setSlot(getInstrumentSlotOfTrack(0), firstInstrument, 0, STEREO_CHANNEL_COUNT);
+    rack.setSlot(getInstrumentSlotOfTrack(0) + 1, firstEffect, STEREO_CHANNEL_COUNT, STEREO_CHANNEL_COUNT);
+    rack.setSlot(getInstrumentSlotOfTrack(SECOND_TRACK), secondInstrument, 0, STEREO_CHANNEL_COUNT);
+    rack.mEngine.startStreaming();
+
+    auto& sequencer = rack.mEngine.getSequencer();
+    sequencer.startRecording();
+    rack.render();
+
+    uint32_t noteOn[] = {MIDI2_NOTE_ON | (TEST_NOTE << ump::NOTE_SHIFT), FULL_VELOCITY};
+    auto bytes = reinterpret_cast<const uint8_t*>(noteOn);
+
+    // Not an instrument: nothing to record
+    rack.mEngine.sendUmpToSlot(getInstrumentSlotOfTrack(0) + 1, bytes, sizeof(noteOn));
+    CHECK(sequencer.getEvents().empty());
+
+    rack.mEngine.sendUmpToSlot(getInstrumentSlotOfTrack(SECOND_TRACK), bytes, sizeof(noteOn));
+    auto events = sequencer.getEvents();
+    CHECK(events.size() == 1 && events[0].mSlot == SECOND_TRACK);
+    CHECK(secondInstrument.mQueuedBytes == static_cast<int32_t>(sizeof(noteOn)));
+}
+
 void testSlotEvents()
 {
     // What the Kotlin host sends for a parameter (UmpHelper.aapUmpSysex8ParameterPlain()): ID 42 at half its range
@@ -471,6 +693,13 @@ int main()
     testLiveEvents();
     testSequencerEvents();
     testSlotEvents();
+    testFourEffectsInSerial();
+    testTracksAreSummed();
+    testTrackGainMuteAndSolo();
+    testTrackLevels();
+    testEmptyTracksAndLimits();
+    testSequencerPlaysEachTrackInstrument();
+    testRecordsLiveNotesUnderTheirTrack();
 
     if (gFailures > 0) {
         std::printf("%d failure(s)\n", gFailures);

@@ -35,7 +35,7 @@ RackEngine::~RackEngine()
 // Control thread
 // ---------------------------------------------------------------------------------------------
 
-void RackEngine::configure(int32_t framesPerCallback, int32_t numSlots)
+void RackEngine::configure(int32_t framesPerCallback, int32_t numTracks)
 {
     closeStream();
 
@@ -43,19 +43,21 @@ void RackEngine::configure(int32_t framesPerCallback, int32_t numSlots)
         std::lock_guard<std::mutex> lock(mControlMutex);
         clearSlotsLocked();
 
-        if (numSlots > MAX_RACK_SLOTS) {
-            LOGW("%d slots requested, the rack supports %d", numSlots, MAX_RACK_SLOTS);
+        if (numTracks > MAX_TRACKS) {
+            LOGW("%d tracks requested, the rack supports %d", numTracks, MAX_TRACKS);
         }
 
-        mNumSlots.store(std::clamp(numSlots, 1, MAX_RACK_SLOTS));
+        auto clampedTracks = std::clamp(numTracks, 1, MAX_TRACKS);
+        mNumTracks.store(clampedTracks);
+        mNumSlots.store(clampedTracks * SLOTS_PER_TRACK);
         // The engine lives as long as the process: a new configuration starts from an empty sequence
         mSequencer.reset();
         mFramesPerCallback.store(std::clamp(framesPerCallback, MIN_DSP_BLOCK_FRAMES, MAX_DSP_BLOCK_FRAMES));
     }
 
     openStream();
-    LOGI("Rack engine configured: sampleRate=%d, framesPerCallback=%d, numSlots=%d",
-         getSampleRate(), mFramesPerCallback.load(), mNumSlots.load());
+    LOGI("Rack engine configured: sampleRate=%d, framesPerCallback=%d, numTracks=%d, numSlots=%d",
+         getSampleRate(), mFramesPerCallback.load(), mNumTracks.load(), mNumSlots.load());
 }
 
 void RackEngine::shutdown()
@@ -83,6 +85,19 @@ void RackEngine::clearSlotsLocked()
         slot.mPeakR.store(0.0f, std::memory_order_relaxed);
         slot.mInvalidBlocks.store(0, std::memory_order_relaxed);
     }
+
+    for (auto& track : mTracks) {
+        track.mGain.store(UNITY_GAIN, std::memory_order_relaxed);
+        track.mIsMuted.store(false, std::memory_order_relaxed);
+        track.mIsSoloed.store(false, std::memory_order_relaxed);
+        track.mCurrentGain = UNITY_GAIN;
+        track.mPeakL.store(0.0f, std::memory_order_relaxed);
+        track.mPeakR.store(0.0f, std::memory_order_relaxed);
+    }
+
+    mIsAnyTrackSoloed.store(false, std::memory_order_relaxed);
+    mMasterPeakL.store(0.0f, std::memory_order_relaxed);
+    mMasterPeakR.store(0.0f, std::memory_order_relaxed);
 }
 
 void RackEngine::setFramesPerCallback(int32_t framesPerCallback)
@@ -121,13 +136,19 @@ void RackEngine::setSlotProcessor(int32_t slotIndex, std::unique_ptr<SlotProcess
 
     auto newProcessor = slot.mOwnedProcessor.get();
 
+    // Only the instrument of a track plays the sequencer's events, which are filed under the track
     if (newProcessor == nullptr) {
-        mSequencer.setSlotEventCapacity(slotIndex, MAX_SLOT_EVENT_WORDS);
+        if (isInstrumentSlot(slotIndex)) {
+            mSequencer.setSlotEventCapacity(getTrackOfSlot(slotIndex), MAX_SLOT_EVENT_WORDS);
+        }
+
         LOGI("Slot %d cleared", slotIndex);
         return;
     }
 
-    mSequencer.setSlotEventCapacity(slotIndex, newProcessor->getEventCapacityWords());
+    if (isInstrumentSlot(slotIndex)) {
+        mSequencer.setSlotEventCapacity(getTrackOfSlot(slotIndex), newProcessor->getEventCapacityWords());
+    }
 
     // Before the first open, prepareToPlay() prepares it with the rest of the rack
     if (getSampleRate() > 0) {
@@ -164,6 +185,39 @@ void RackEngine::setSlotMix(int32_t slotIndex, float mix)
     }
 }
 
+void RackEngine::setTrackGain(int32_t trackIndex, float gain)
+{
+    if (isValidTrack(trackIndex)) {
+        mTracks[trackIndex].mGain.store(std::clamp(gain, SILENT_GAIN, MAX_TRACK_GAIN), std::memory_order_relaxed);
+    }
+}
+
+void RackEngine::setTrackMuted(int32_t trackIndex, bool muted)
+{
+    if (isValidTrack(trackIndex)) {
+        mTracks[trackIndex].mIsMuted.store(muted, std::memory_order_relaxed);
+    }
+}
+
+void RackEngine::setTrackSoloed(int32_t trackIndex, bool soloed)
+{
+    if (!isValidTrack(trackIndex)) {
+        return;
+    }
+
+    // Held so two solo changes cannot leave the any-solo flag out of date
+    std::lock_guard<std::mutex> lock(mControlMutex);
+    mTracks[trackIndex].mIsSoloed.store(soloed, std::memory_order_relaxed);
+
+    auto isAnySoloed = false;
+
+    for (int32_t i = 0; i < mNumTracks.load(std::memory_order_relaxed); i++) {
+        isAnySoloed = isAnySoloed || mTracks[i].mIsSoloed.load(std::memory_order_relaxed);
+    }
+
+    mIsAnyTrackSoloed.store(isAnySoloed, std::memory_order_relaxed);
+}
+
 void RackEngine::sendUmpToSlot(int32_t slotIndex, const uint8_t* data, int32_t size)
 {
     if (!isValidSlot(slotIndex) || data == nullptr || size <= 0) {
@@ -178,8 +232,11 @@ void RackEngine::sendUmpToSlot(int32_t slotIndex, const uint8_t* data, int32_t s
         return;
     }
 
-    // Recorded where the processor receives it: at the start of the next block
-    mSequencer.recordInput(slotIndex, data, size);
+    // Recorded where the processor receives it: at the start of the next block. Only notes played on an
+    // instrument are recorded, under the instrument's track.
+    if (isInstrumentSlot(slotIndex)) {
+        mSequencer.recordInput(getTrackOfSlot(slotIndex), data, size);
+    }
 }
 
 float RackEngine::getTotalCpuLoad() const
@@ -215,9 +272,30 @@ void RackEngine::getAllSlotLevels(float* outLevels, int32_t maxSlots) const
     }
 }
 
+void RackEngine::getTrackLevels(float* outLevels, int32_t maxTracks) const
+{
+    auto count = std::min(mNumTracks.load(std::memory_order_relaxed), maxTracks);
+
+    for (int32_t i = 0; i < count; i++) {
+        outLevels[i * STEREO_CHANNEL_COUNT] = mTracks[i].mPeakL.load(std::memory_order_relaxed);
+        outLevels[i * STEREO_CHANNEL_COUNT + 1] = mTracks[i].mPeakR.load(std::memory_order_relaxed);
+    }
+}
+
+void RackEngine::getMasterLevels(float* outLevels) const
+{
+    outLevels[0] = mMasterPeakL.load(std::memory_order_relaxed);
+    outLevels[1] = mMasterPeakR.load(std::memory_order_relaxed);
+}
+
 bool RackEngine::isValidSlot(int32_t slotIndex) const
 {
     return slotIndex >= 0 && slotIndex < mNumSlots.load(std::memory_order_relaxed);
+}
+
+bool RackEngine::isValidTrack(int32_t trackIndex) const
+{
+    return trackIndex >= 0 && trackIndex < mNumTracks.load(std::memory_order_relaxed);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -252,6 +330,11 @@ void RackEngine::streamStarting()
         mSlots[i].mSmoothedLoad = 0.0;
     }
 
+    // A track that was muted or soloed while the stream was stopped starts at its level, not ramping to it
+    for (auto& track : mTracks) {
+        track.mCurrentGain = track.mGain.load(std::memory_order_relaxed);
+    }
+
     mBlockFrames = 0;
     mBlockReadFrame = 0;
     mSmoothedTotalLoad = 0.0;
@@ -271,6 +354,13 @@ void RackEngine::flushState()
         }
     }
 
+    for (auto& track : mTracks) {
+        track.mPeakL.store(0.0f, std::memory_order_relaxed);
+        track.mPeakR.store(0.0f, std::memory_order_relaxed);
+    }
+
+    mMasterPeakL.store(0.0f, std::memory_order_relaxed);
+    mMasterPeakR.store(0.0f, std::memory_order_relaxed);
     mTotalCpuLoad.store(0.0f, std::memory_order_relaxed);
     mSequencer.onStreamStopped();
 }
@@ -318,17 +408,54 @@ void RackEngine::renderBlock(int32_t frames)
 {
     auto blockDurationNs = static_cast<double>(frames) * NANOS_PER_SECOND / static_cast<double>(mRenderSampleRate);
     auto blockStart = Clock::now();
-    auto numSlots = mNumSlots.load(std::memory_order_relaxed);
+    auto numTracks = mNumTracks.load(std::memory_order_relaxed);
+    auto isAnyTrackSoloed = mIsAnyTrackSoloed.load(std::memory_order_relaxed);
 
     mSequencer.beginBlock(frames, mRenderSampleRate);
 
-    // The instrument slot starts from silence; each following slot processes the previous output in place
+    // The master starts from silence and every track adds its signal
     std::fill_n(mBlockBuffer.data(), frames * STEREO_CHANNEL_COUNT, 0.0f);
 
-    for (int32_t i = 0; i < numSlots; i++) {
-        auto& slot = mSlots[i];
+    for (int32_t i = 0; i < numTracks; i++) {
+        renderTrack(i, frames, isAnyTrackSoloed);
+    }
+
+    // After the tracks, so effects do not process the clicks
+    mSequencer.renderMetronome(mBlockBuffer.data(), frames);
+
+    float masterPeakL = 0.0f;
+    float masterPeakR = 0.0f;
+    simd::measureStereoPeak(mBlockBuffer.data(), frames, masterPeakL, masterPeakR);
+    mMasterPeakL.store(nextPeak(mMasterPeakL.load(std::memory_order_relaxed), masterPeakL), std::memory_order_relaxed);
+    mMasterPeakR.store(nextPeak(mMasterPeakR.load(std::memory_order_relaxed), masterPeakR), std::memory_order_relaxed);
+
+    mSmoothedTotalLoad = smoothLoad(mSmoothedTotalLoad, Clock::now() - blockStart, blockDurationNs);
+    mTotalCpuLoad.store(static_cast<float>(mSmoothedTotalLoad), std::memory_order_relaxed);
+
+    mBlockFrames = frames;
+    mBlockReadFrame = 0;
+}
+
+/**
+ * Runs the track's chain over mTrackBuffer, the instrument first and each effect over the previous
+ * output, and adds the result to the master at the track's level. A muted or unsoloed track still
+ * runs, so its plugins keep their state and the notes the sequencer plays on it end.
+ */
+void RackEngine::renderTrack(int32_t trackIndex, int32_t frames, bool isAnyTrackSoloed)
+{
+    auto& track = mTracks[trackIndex];
+    auto blockDurationNs = static_cast<double>(frames) * NANOS_PER_SECOND / static_cast<double>(mRenderSampleRate);
+    auto firstSlot = trackIndex * SLOTS_PER_TRACK;
+    auto hasSignal = false;
+
+    // The instrument starts from silence; each following slot processes the previous output in place
+    std::fill_n(mTrackBuffer.data(), frames * STEREO_CHANNEL_COUNT, 0.0f);
+
+    for (int32_t i = 0; i < SLOTS_PER_TRACK; i++) {
+        auto slotIndex = firstSlot + i;
+        auto& slot = mSlots[slotIndex];
         auto slotStart = Clock::now();
-        auto rendered = renderSlot(i, frames);
+        auto rendered = renderSlot(slotIndex, frames);
 
         // Nothing was applied: jump to the host settings so they don't ramp from stale values later
         if (!rendered) {
@@ -343,32 +470,44 @@ void RackEngine::renderBlock(int32_t frames)
         float peakR = 0.0f;
 
         if (rendered) {
-            simd::measureStereoPeak(mBlockBuffer.data(), frames, peakL, peakR);
+            simd::measureStereoPeak(mTrackBuffer.data(), frames, peakL, peakR);
+            hasSignal = true;
         }
 
         slot.mPeakL.store(nextPeak(slot.mPeakL.load(std::memory_order_relaxed), peakL), std::memory_order_relaxed);
         slot.mPeakR.store(nextPeak(slot.mPeakR.load(std::memory_order_relaxed), peakR), std::memory_order_relaxed);
     }
 
-    // After the slots, so effects do not process the clicks
-    mSequencer.renderMetronome(mBlockBuffer.data(), frames);
+    auto isAudible = !track.mIsMuted.load(std::memory_order_relaxed) &&
+                     (!isAnyTrackSoloed || track.mIsSoloed.load(std::memory_order_relaxed));
+    auto targetGain = isAudible ? track.mGain.load(std::memory_order_relaxed) : SILENT_GAIN;
+    float peakL = 0.0f;
+    float peakR = 0.0f;
 
-    mSmoothedTotalLoad = smoothLoad(mSmoothedTotalLoad, Clock::now() - blockStart, blockDurationNs);
-    mTotalCpuLoad.store(static_cast<float>(mSmoothedTotalLoad), std::memory_order_relaxed);
+    // An empty track, or one muted and already silent, adds nothing
+    if (hasSignal && (track.mCurrentGain != SILENT_GAIN || targetGain != SILENT_GAIN)) {
+        simd::measureStereoPeak(mTrackBuffer.data(), frames, peakL, peakR);
+        simd::addStereoWithGainRamp(mTrackBuffer.data(), mBlockBuffer.data(), frames, track.mCurrentGain, targetGain);
+        // The peak before the fader, scaled by its level
+        peakL *= targetGain;
+        peakR *= targetGain;
+    }
 
-    mBlockFrames = frames;
-    mBlockReadFrame = 0;
+    track.mCurrentGain = targetGain;
+    track.mPeakL.store(nextPeak(track.mPeakL.load(std::memory_order_relaxed), peakL), std::memory_order_relaxed);
+    track.mPeakR.store(nextPeak(track.mPeakR.load(std::memory_order_relaxed), peakR), std::memory_order_relaxed);
 }
 
 /**
- * Runs one slot over mBlockBuffer in place. Returns true if the processor output replaced the buffer;
+ * Runs one slot over mTrackBuffer in place. Returns true if the processor output replaced the buffer;
  * false leaves it untouched (empty, bypassed or failed slots, and blocks with NaN or infinite
  * samples, pass the signal through).
  */
 bool RackEngine::renderSlot(int32_t slotIndex, int32_t frames)
 {
     auto& slot = mSlots[slotIndex];
-    auto isInstrument = slotIndex == INSTRUMENT_SLOT_INDEX;
+    auto isInstrument = isInstrumentSlot(slotIndex);
+    auto trackIndex = getTrackOfSlot(slotIndex);
     auto processor = slot.mProcessor.load();
     auto isBypassed = slot.mIsBypassed.load(std::memory_order_relaxed);
 
@@ -389,14 +528,23 @@ bool RackEngine::renderSlot(int32_t slotIndex, int32_t frames)
     }
 
     if (isBypassStarting) {
-        mSequencer.releaseSlotNotes(slotIndex);
+        if (isInstrument) {
+            mSequencer.releaseSlotNotes(trackIndex);
+        }
+
         slot.mWasBypassed = true;
     }
 
+    // The sequencer plays the track's instrument; the effects only get live events
     int32_t eventWordCount = 0;
-    auto events = mSequencer.getSlotEvents(slotIndex, eventWordCount);
+    const uint32_t* events = nullptr;
+
+    if (isInstrument) {
+        events = mSequencer.getSlotEvents(trackIndex, eventWordCount);
+    }
+
     SlotOutput out;
-    auto hasOutput = processor->process(mBlockBuffer.data(), frames, events, eventWordCount, out);
+    auto hasOutput = processor->process(mTrackBuffer.data(), frames, events, eventWordCount, out);
 
     // Once bypassed, its output is not used
     if (isBypassStarting || !hasOutput) {
@@ -410,18 +558,18 @@ bool RackEngine::renderSlot(int32_t slotIndex, int32_t frames)
         return false;
     }
 
-    // mBlockBuffer still holds the slot's input: the dry signal of the host mix
+    // mTrackBuffer still holds the slot's input: the dry signal of the host mix
     auto targetGain = slot.mGain.load(std::memory_order_relaxed);
     auto targetMix = slot.mMix.load(std::memory_order_relaxed);
     auto isUnityWet = slot.mCurrentGain == UNITY_GAIN && targetGain == UNITY_GAIN &&
                       slot.mCurrentMix == WET_ONLY_MIX && targetMix == WET_ONLY_MIX;
 
     if (isUnityWet && out.mRight == out.mLeft) {
-        simd::interleaveMonoToStereo(out.mLeft, mBlockBuffer.data(), frames);
+        simd::interleaveMonoToStereo(out.mLeft, mTrackBuffer.data(), frames);
     } else if (isUnityWet) {
-        simd::interleaveStereo(out.mLeft, out.mRight, mBlockBuffer.data(), frames);
+        simd::interleaveStereo(out.mLeft, out.mRight, mTrackBuffer.data(), frames);
     } else {
-        simd::mixStereo(out.mLeft, out.mRight, mBlockBuffer.data(), frames,
+        simd::mixStereo(out.mLeft, out.mRight, mTrackBuffer.data(), frames,
                         (WET_ONLY_MIX - slot.mCurrentMix) * slot.mCurrentGain, (WET_ONLY_MIX - targetMix) * targetGain,
                         slot.mCurrentMix * slot.mCurrentGain, targetMix * targetGain);
     }

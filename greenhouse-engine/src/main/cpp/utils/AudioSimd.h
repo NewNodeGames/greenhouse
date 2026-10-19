@@ -147,6 +147,40 @@ inline void mixStereo(const float* wetL, const float* wetR, float* inOutInterlea
     }
 }
 
+/**
+ * Adds src * gain to inOutInterleaved (both interleaved stereo), the gain ramping linearly over the
+ * block from gainStart to gainEnd at the last frame. This is how a track joins the master mix.
+ */
+inline void addStereoWithGainRamp(const float* srcInterleaved, float* inOutInterleaved, int32_t numFrames,
+                                  float gainStart, float gainEnd)
+{
+    auto frameCount = static_cast<float>(numFrames);
+    auto step = (gainEnd - gainStart) / frameCount;
+    int32_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    const float laneOffsets[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float32x4_t offsets = vld1q_f32(laneOffsets);
+    float32x4_t base = vdupq_n_f32(gainStart);
+
+    for (; i <= numFrames - 4; i += 4) {
+        float32x4_t position = vaddq_f32(vdupq_n_f32(static_cast<float>(i)), offsets);
+        float32x4_t gain = vmlaq_n_f32(base, position, step);
+        float32x4x2_t src = vld2q_f32(srcInterleaved + (i * 2));
+        float32x4x2_t dst = vld2q_f32(inOutInterleaved + (i * 2));
+        dst.val[0] = vmlaq_f32(dst.val[0], src.val[0], gain);
+        dst.val[1] = vmlaq_f32(dst.val[1], src.val[1], gain);
+        vst2q_f32(inOutInterleaved + (i * 2), dst);
+    }
+#endif
+
+    for (; i < numFrames; i++) {
+        auto gain = gainStart + step * static_cast<float>(i + 1);
+        inOutInterleaved[i * 2 + 0] += srcInterleaved[i * 2 + 0] * gain;
+        inOutInterleaved[i * 2 + 1] += srcInterleaved[i * 2 + 1] * gain;
+    }
+}
+
 /** False if any of the samples is NaN or infinite. */
 inline bool allFinite(const float* samples, int32_t numSamples)
 {

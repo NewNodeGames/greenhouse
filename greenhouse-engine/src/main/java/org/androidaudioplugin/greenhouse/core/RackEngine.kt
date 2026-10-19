@@ -21,15 +21,47 @@ data class OutputStreamMode(
 /**
  * Kotlin side of the native `RackEngine` (one per process). Only one instance should be alive at a
  * time: creating one reconfigures the native engine, and closing it releases the audio device.
+ *
+ * The rack has [numTracks] tracks side by side, summed into the master. A track is a serial chain: its
+ * instrument in the first of its [SLOTS_PER_TRACK] slots, then [EFFECT_SLOTS_PER_TRACK] effect slots.
+ * Slots are numbered across the rack, track by track: `slot = track * SLOTS_PER_TRACK + position`.
  */
 class RackEngine(
     framesPerCallback: Int,
-    val numSlots: Int = DEFAULT_NUM_RACK_SLOTS
+    val numTracks: Int = DEFAULT_NUM_TRACKS
 ) : AutoCloseable {
 
     companion object {
         private const val TAG = "RackEngine"
-        const val DEFAULT_NUM_RACK_SLOTS = 3
+
+        // Layout shared with engine/TrackLayout.h
+        const val EFFECT_SLOTS_PER_TRACK = 4
+        const val INSTRUMENT_SLOT_IN_TRACK = 0
+        const val SLOTS_PER_TRACK = INSTRUMENT_SLOT_IN_TRACK + 1 + EFFECT_SLOTS_PER_TRACK
+        const val MAX_TRACKS = 8
+        const val DEFAULT_NUM_TRACKS = 4
+        private const val STEREO_CHANNELS = 2
+        const val DEFAULT_NUM_RACK_SLOTS = DEFAULT_NUM_TRACKS * SLOTS_PER_TRACK
+
+        /** Whether the slot is the instrument of its track (otherwise it is one of its effects). */
+        fun isInstrumentSlot(slotIndex: Int): Boolean {
+            return slotIndex % SLOTS_PER_TRACK == INSTRUMENT_SLOT_IN_TRACK
+        }
+
+        /** The slot of the track's instrument. */
+        fun instrumentSlotOf(trackIndex: Int): Int {
+            return trackIndex * SLOTS_PER_TRACK + INSTRUMENT_SLOT_IN_TRACK
+        }
+
+        /** The slot of the track's [effectIndex]th effect, from 0. */
+        fun effectSlotOf(trackIndex: Int, effectIndex: Int): Int {
+            return trackIndex * SLOTS_PER_TRACK + INSTRUMENT_SLOT_IN_TRACK + 1 + effectIndex
+        }
+
+        /** The track a slot belongs to. */
+        fun trackOfSlot(slotIndex: Int): Int {
+            return slotIndex / SLOTS_PER_TRACK
+        }
         const val MIDI2_SIGNED_32BIT_MAX = 0x8000_0000L
         const val MIDI2_32BIT_MAX = 0xFFFF_FFFFL
         const val MIDI2_16BIT_MAX = 0xFFFF
@@ -60,7 +92,7 @@ class RackEngine(
         }
 
         @JvmStatic
-        private external fun nativeConfigure(framesPerCallback: Int, numSlots: Int)
+        private external fun nativeConfigure(framesPerCallback: Int, numTracks: Int)
 
         @JvmStatic
         private external fun nativeShutdown()
@@ -111,6 +143,15 @@ class RackEngine(
         private external fun nativeSetSlotMix(slotIndex: Int, mix: Float)
 
         @JvmStatic
+        private external fun nativeSetTrackGain(trackIndex: Int, gain: Float)
+
+        @JvmStatic
+        private external fun nativeSetTrackMuted(trackIndex: Int, muted: Boolean)
+
+        @JvmStatic
+        private external fun nativeSetTrackSoloed(trackIndex: Int, soloed: Boolean)
+
+        @JvmStatic
         private external fun nativeSendUmp(slotIndex: Int, data: ByteArray, length: Int)
 
         @JvmStatic
@@ -124,6 +165,12 @@ class RackEngine(
 
         @JvmStatic
         private external fun nativeGetAllSlotLevels(outLevels: FloatArray)
+
+        @JvmStatic
+        private external fun nativeGetTrackLevels(outLevels: FloatArray)
+
+        @JvmStatic
+        private external fun nativeGetMasterLevels(outLevels: FloatArray)
 
         @JvmStatic
         private external fun nativeGetAapEventBufferBytes(): Int
@@ -143,8 +190,19 @@ class RackEngine(
     val streamMode: OutputStreamMode
         get() = OutputStreamMode(nativeIsLowLatency(), nativeIsExclusive(), nativeIsMMapUsed())
 
+    /** Every slot of the rack. */
+    val numSlots: Int = numTracks.coerceIn(1, MAX_TRACKS) * SLOTS_PER_TRACK
+
+    /**
+     * The instrument slot that [sendNoteOn] and [sendNoteOff] play, and so the track the sequencer records
+     * what is played on. The first track's by default. Change it with [setNoteTarget].
+     */
+    @Volatile
+    var noteTargetSlot: Int = instrumentSlotOf(0)
+        private set
+
     init {
-        nativeConfigure(framesPerCallback, numSlots)
+        nativeConfigure(framesPerCallback, numTracks)
     }
 
     /** Records the MIDI sent to the slots and plays it back. Its transport runs while the engine does. */
@@ -182,6 +240,55 @@ class RackEngine(
     fun getAllSlotLevels(outLevels: FloatArray) {
         if (outLevels.isNotEmpty()) {
             nativeGetAllSlotLevels(outLevels)
+        }
+    }
+
+    /**
+     * Makes [slotIndex], the instrument of a track, the one played by the notes sent without a slot. The notes
+     * sounding on the one before it are ended, since their note-offs would now go elsewhere. Anything but an
+     * instrument slot of the rack is ignored.
+     */
+    fun setNoteTarget(slotIndex: Int) {
+        if (slotIndex !in 0 until numSlots || !isInstrumentSlot(slotIndex) || slotIndex == noteTargetSlot) {
+            return
+        }
+
+        allNotesOff()
+        noteTargetSlot = slotIndex
+    }
+
+    /** Fills [outLevels] with the (left, right) peak of each track in the mix, after its level, mute and solo. */
+    fun getTrackLevels(outLevels: FloatArray) {
+        if (outLevels.isNotEmpty()) {
+            nativeGetTrackLevels(outLevels)
+        }
+    }
+
+    /** Fills [outLevels] (at least two values) with the (left, right) peak of the master. */
+    fun getMasterLevels(outLevels: FloatArray) {
+        if (outLevels.size >= STEREO_CHANNELS) {
+            nativeGetMasterLevels(outLevels)
+        }
+    }
+
+    /** Level of the track in the master mix, as a linear gain. */
+    fun setTrackGain(trackIndex: Int, gain: Float) {
+        if (trackIndex in 0 until numTracks) {
+            nativeSetTrackGain(trackIndex, gain)
+        }
+    }
+
+    /** A muted track still runs, so its plugins keep their state, but is not heard. */
+    fun setTrackMuted(trackIndex: Int, muted: Boolean) {
+        if (trackIndex in 0 until numTracks) {
+            nativeSetTrackMuted(trackIndex, muted)
+        }
+    }
+
+    /** While any track is soloed, only the soloed tracks are heard. */
+    fun setTrackSoloed(trackIndex: Int, soloed: Boolean) {
+        if (trackIndex in 0 until numTracks) {
+            nativeSetTrackSoloed(trackIndex, soloed)
         }
     }
 
@@ -277,13 +384,13 @@ class RackEngine(
     fun sendNoteOn(note: Int, velocity: Float = 1.0f) {
         val velocity16 = (velocity.coerceIn(0.0f, 1.0f) * MIDI2_16BIT_MAX).toInt()
         val ump = Ump(UmpFactory.midi2NoteOn(0, 0, note, 0, velocity16, 0))
-        sendUmpToSlot(0, ump.toPlatformNativeBytes())
+        sendUmpToSlot(noteTargetSlot, ump.toPlatformNativeBytes())
     }
 
     fun sendNoteOff(note: Int, velocity: Float = 0.0f) {
         val velocity16 = (velocity.coerceIn(0.0f, 1.0f) * MIDI2_16BIT_MAX).toInt()
         val ump = Ump(UmpFactory.midi2NoteOff(0, 0, note, 0, velocity16, 0))
-        sendUmpToSlot(0, ump.toPlatformNativeBytes())
+        sendUmpToSlot(noteTargetSlot, ump.toPlatformNativeBytes())
     }
 
     fun sendPitchBend(slotIndex: Int = 0, note: Int = -1, value: Float) {

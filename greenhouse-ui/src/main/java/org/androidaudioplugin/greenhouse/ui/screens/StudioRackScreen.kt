@@ -12,6 +12,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import org.androidaudioplugin.greenhouse.core.RackEngine
 import org.androidaudioplugin.greenhouse.device.aap.AapSlotDevice
 import org.androidaudioplugin.greenhouse.ui.HostViewModel
 import org.androidaudioplugin.greenhouse.ui.StudioRackViewMode
@@ -72,9 +73,29 @@ fun StudioRackScreen(
 
             Spacer(modifier = Modifier.height(RACK_ELEMENT_SPACING))
 
-            // Multi-Slot Audio Signal Chain Rack Header
+            // The tracks of the rack, side by side: pick the one to edit, and mix them
+            RackTrackStrip(
+                tracks = viewModel.project.project.tracks.take(viewModel.rack.numTracks),
+                activeTrack = viewModel.rack.activeTrackIndex,
+                onSelectTrack = { trackIdx ->
+                    viewModel.rack.selectActiveTrack(trackIdx)
+                },
+                onToggleMute = { trackIdx ->
+                    viewModel.project.updateTrackMix(trackIdx) { it.copy(isMuted = !it.isMuted) }
+                },
+                onToggleSolo = { trackIdx ->
+                    viewModel.project.updateTrackMix(trackIdx) { it.copy(isSoloed = !it.isSoloed) }
+                },
+                onLevelChange = { trackIdx, levelDb ->
+                    viewModel.project.updateTrackMix(trackIdx) { it.copy(levelDb = levelDb) }
+                }
+            )
+
+            Spacer(modifier = Modifier.height(RACK_ELEMENT_SPACING))
+
+            // Audio signal chain of the active track: its instrument, then its effects
             SignalRackHeader(
-                slots = viewModel.rack.slots,
+                slots = viewModel.rack.slots.filter { RackEngine.trackOfSlot(it.index) == viewModel.rack.activeTrackIndex },
                 activeSlotIndex = currentSlotIndex,
                 isProcessing = viewModel.audio.isProcessing,
                 slotCpuLoadsProvider = { viewModel.meters.slotCpuLoads },
@@ -185,7 +206,7 @@ fun StudioRackScreen(
 
         Spacer(modifier = Modifier.height(RACK_ELEMENT_SPACING))
 
-        // On-screen Live Interactive MIDI Keyboard (Routes to Slot 0: Instrument)
+        // On-screen Live Interactive MIDI Keyboard (plays the instrument of the active track)
         MidiKeyboardSection(viewModel = viewModel)
     }
 
