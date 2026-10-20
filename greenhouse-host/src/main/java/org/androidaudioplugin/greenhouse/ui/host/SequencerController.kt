@@ -44,11 +44,13 @@ data class QuantizeOption(val label: String, val ticks: Int)
 
 /**
  * Transport, settings and session state of the MIDI sequencer. Recording and playback run in the
- * native engine; this polls it for the UI and saves / restores the sequence with the session.
+ * native engine; this polls it for the UI and saves / restores the sequence with the session. What it
+ * plays is the [arrangement]'s song: what is recorded becomes clips of it when the recording ends.
  */
 class SequencerController(
     private val context: Context,
     private val audio: AudioEngineController,
+    private val arrangement: ProjectController,
     private val scope: CoroutineScope,
     private val postStatus: (String) -> Unit
 ) {
@@ -235,6 +237,13 @@ class SequencerController(
         private set
 
     /** Tick of the playhead while playing. Separate from [status] so it can change without recomposing its readers. */
+    /**
+     * Where playing starts from, in ticks: the arrangement's cursor. Moved with [seekTo]; the start of the
+     * song until then, and still where it was after the transport stops.
+     */
+    var startTick by mutableLongStateOf(0L)
+        private set
+
     var positionTick by mutableLongStateOf(0L)
         private set
 
@@ -263,11 +272,27 @@ class SequencerController(
     fun togglePlayback() {
         if (isRunning) {
             sequencer.stop()
+            // Stopping ends a recording: what it recorded becomes clips
+            arrangement.commitRecording()
             return
         }
 
         if (ensureAudioRunning()) {
-            sequencer.startPlayback()
+            // Within the loop: a cursor left past the end of a song that was then shortened starts it again
+            val lastTick = (status.lengthTicks - 1).coerceAtLeast(0L)
+            sequencer.startPlaybackFrom(startTick.coerceIn(0L, lastTick))
+        }
+    }
+
+    /**
+     * Puts the cursor at [tick]. While playing, the playhead jumps there as well (not while recording, which
+     * follows the transport from where it began).
+     */
+    fun seekTo(tick: Long) {
+        startTick = tick.coerceAtLeast(0L)
+
+        if (isRunning && !status.isRecording) {
+            sequencer.seek(startTick)
         }
     }
 
@@ -278,6 +303,7 @@ class SequencerController(
     fun toggleRecording() {
         if (status.isRecording) {
             sequencer.stopRecording()
+            arrangement.commitRecording()
             return
         }
 
@@ -287,7 +313,16 @@ class SequencerController(
     }
 
     fun updateSettings(transform: (SequencerSettings) -> SequencerSettings) {
-        sequencer.settings = transform(settings)
+        val requested = transform(settings)
+
+        if (arrangement.project.hasPlacements && requested.lengthBars != settings.lengthBars) {
+            // A song is as long as its clips take: the setting is the least it can be, which the arrangement sends on
+            arrangement.setLengthBars(requested.lengthBars)
+            sequencer.settings = requested.copy(lengthBars = sequencer.settings.lengthBars)
+        } else {
+            sequencer.settings = requested
+        }
+
         // Read back: the engine clamps the values
         settings = sequencer.settings
     }
@@ -315,13 +350,21 @@ class SequencerController(
         updateSettings { it.copy(bpm = bpm) }
     }
 
+    /** While recording, removes the last take; otherwise undoes the last change to the song, such as a recording. */
     fun undoLastTake() {
-        sequencer.undoLastTake()
-        postStatus("Last take removed.")
+        if (sequencer.status.isRecording) {
+            sequencer.undoLastTake()
+            postStatus("Last take removed.")
+        } else if (arrangement.undo()) {
+            postStatus("Last change undone.")
+        } else {
+            postStatus("Nothing to undo.")
+        }
     }
 
     fun clear() {
         sequencer.clear()
+        arrangement.clearSong()
         postStatus("Sequence cleared.")
     }
 
@@ -347,6 +390,8 @@ class SequencerController(
                 }
 
                 apply(snapshot)
+                // The file replaced the sequence: the song is made from it
+                arrangement.adoptEngineSequence()
                 postStatus("MIDI file imported: ${status.eventCount} events at ${formatBpm(settings.bpm)} bpm.")
             }
         }
@@ -406,12 +451,19 @@ class SequencerController(
         }
 
         withContext(Dispatchers.Main) {
+            val wasRecording = status.isRecording
+
             positionTick = polledPosition
             positionNanos = polledNanos
             status = polled
 
             if (snapshot != null) {
                 apply(snapshot)
+            }
+
+            // A recording the engine ended itself (the transport was stopped some other way)
+            if (wasRecording && !polled.isRecording) {
+                arrangement.commitRecording()
             }
         }
     }
