@@ -1,15 +1,16 @@
 name: Debug APK
 
 # Builds the debug APK of the branch you name and keeps it as a download of the run (Actions tab > the
-# run > Artifacts). Run it by hand from main: "Run workflow", then type the branch to build.
+# run > Artifacts). Run it by hand from main: "Run workflow", then type the exact name of the branch.
+# If the name does not exist the run fails at once and its log lists the branches that do.
 # It publishes nothing.
 
 on:
   workflow_dispatch:
     inputs:
       branch:
-        description: Branch to build
-        default: multipista-fase-3a
+        description: Exact name of the branch to build
+        required: true
 
 jobs:
   build-debug-apk:
@@ -18,6 +19,19 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      - name: Check that the branch exists
+        env:
+          BRANCH: ${{ inputs.branch }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          if git ls-remote --exit-code --heads "$REPO_URL" "$BRANCH" > /dev/null; then
+            echo "Found the branch $BRANCH"
+          else
+            echo "There is no branch called '$BRANCH'. The branches are:"
+            git ls-remote --heads "$REPO_URL" | sed 's#.*refs/heads/#  #'
+            exit 1
+          fi
+
       - name: Checkout the branch
         uses: actions/checkout@v4
         with:
