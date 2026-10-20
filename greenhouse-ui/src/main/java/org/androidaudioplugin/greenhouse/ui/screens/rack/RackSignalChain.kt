@@ -1,5 +1,6 @@
 package org.androidaudioplugin.greenhouse.ui.screens.rack
 
+import org.androidaudioplugin.greenhouse.core.RackEngine
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -142,7 +143,7 @@ fun SignalRackHeader(
             val isLoading = slot.isLoading
             val slotLevel = slotLevels.getOrNull(slot.index) ?: SlotLevel()
 
-            val badgeColor = if (slot.index == 0) {
+            val badgeColor = if (RackEngine.isInstrumentSlot(slot.index)) {
                 BlossomCoral
             } else {
                 PeriwinkleBlue
@@ -423,7 +424,7 @@ fun SignalRackHeader(
                 val isCurrentSlotActive = isProcessing && isLoaded && !slot.isBypassed
                 val isFlowActive = isCurrentSlotActive || (isUpstreamActive && hasDownstreamLoaded)
 
-                val connectorColor = if (slot.index == 0) {
+                val connectorColor = if (RackEngine.isInstrumentSlot(slot.index)) {
                     BlossomCoral
                 } else {
                     PeriwinkleBlue

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/TrackLayout.h"
 #include "sequencer/Ump.h"
 #include <algorithm>
 #include <cstdint>
@@ -22,9 +23,10 @@ constexpr double SECONDS_PER_MINUTE = 60.0;
 constexpr int32_t AUTO_LENGTH_BARS = 0;
 constexpr int32_t MAX_SEQUENCE_LENGTH_BARS = 999;
 constexpr int32_t MAX_SEQUENCE_EVENTS = 65536;
-// Slots the sequencer records and plays. Only the instrument slot gets notes; events, sessions and
-// .mid files keep a slot index so this can grow (e.g. for automation on effect slots).
-constexpr int32_t MAX_SEQUENCER_SLOTS = 1;
+// Slots the sequencer records and plays: one per track, each sending its notes to the track's instrument
+// (an event's slot is its track index). Events, sessions and .mid files keep a slot index so this can
+// grow (e.g. for automation on effect slots).
+constexpr int32_t MAX_SEQUENCER_SLOTS = MAX_TRACKS;
 
 constexpr int32_t NO_TAKE = -1;
 constexpr int32_t DEFAULT_QUANTIZE_TICKS = SEQUENCER_PPQ / 4; // 1/16
@@ -45,7 +47,7 @@ struct SequencerSettings
     float mMetronomeLevelDb{DEFAULT_METRONOME_LEVEL_DB};
 };
 
-/** A MIDI event of the sequence: a UMP packet sent to a rack slot at a musical position. */
+/** A MIDI event of the sequence: a UMP packet sent to a track's instrument at a musical position. */
 struct SequenceEvent
 {
     int64_t mTick{0};
