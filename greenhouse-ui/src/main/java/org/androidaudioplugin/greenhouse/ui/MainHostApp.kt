@@ -21,7 +21,9 @@ import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import org.androidaudioplugin.greenhouse.ui.screens.ArrangementScreen
 import org.androidaudioplugin.greenhouse.ui.screens.EngineSettingsScreen
+import org.androidaudioplugin.greenhouse.ui.screens.PianoRollScreen
 import org.androidaudioplugin.greenhouse.ui.screens.PluginBrowserScreen
 import org.androidaudioplugin.greenhouse.ui.screens.StudioRackScreen
 import org.androidaudioplugin.greenhouse.ui.screens.rack.BannerSnackbarHost
@@ -30,6 +32,10 @@ import org.androidaudioplugin.greenhouse.ui.theme.*
 private const val ROUTE_RACK = "rack"
 private const val ROUTE_BROWSER = "browser"
 private const val ROUTE_SETTINGS = "settings"
+private const val ROUTE_ARRANGEMENT = "arrangement"
+private const val ARG_TRACK = "track"
+private const val ARG_CLIP = "clip"
+private const val ROUTE_PIANO_ROLL = "pianoroll/{$ARG_TRACK}/{$ARG_CLIP}"
 
 // Lines the snackbar up with the rack's header banner, which it covers
 private val SNACKBAR_SCREEN_PADDING = 12.dp
@@ -106,6 +112,7 @@ fun MainHostApp(
                             viewModel = viewModel,
                             onNavigateToBrowser = { navController.safeNavigate(ROUTE_BROWSER) },
                             onNavigateToSettings = { navController.safeNavigate(ROUTE_SETTINGS) },
+                            onNavigateToArrangement = { navController.safeNavigate(ROUTE_ARRANGEMENT) },
                             onBannerHeightChanged = { bannerHeight = it }
                         )
                     }
@@ -117,6 +124,34 @@ fun MainHostApp(
                             viewModel = viewModel,
                             onNavigateToRack = { navController.safePopBackToRack() }
                         )
+                    }
+                }
+
+                composable(ROUTE_ARRANGEMENT) {
+                    Box(modifier = Modifier.padding(paddingValues)) {
+                        ArrangementScreen(
+                            viewModel = viewModel,
+                            onNavigateBack = { navController.safePopBackToRack() },
+                            onEditClip = { trackIndex, clipId ->
+                                navController.safeNavigate("pianoroll/$trackIndex/$clipId")
+                            }
+                        )
+                    }
+                }
+
+                composable(ROUTE_PIANO_ROLL) { backStackEntry ->
+                    val trackIndex = backStackEntry.arguments?.getString(ARG_TRACK)?.toIntOrNull()
+                    val clipId = backStackEntry.arguments?.getString(ARG_CLIP)?.toIntOrNull()
+
+                    Box(modifier = Modifier.padding(paddingValues)) {
+                        if (trackIndex != null && clipId != null) {
+                            PianoRollScreen(
+                                viewModel = viewModel,
+                                trackIndex = trackIndex,
+                                clipId = clipId,
+                                onNavigateBack = { navController.popBackStack() }
+                            )
+                        }
                     }
                 }
 

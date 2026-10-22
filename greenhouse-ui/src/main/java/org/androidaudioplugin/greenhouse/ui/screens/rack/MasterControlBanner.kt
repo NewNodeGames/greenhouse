@@ -21,6 +21,7 @@ import androidx.compose.foundation.text.TextAutoSize
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.LibraryMusic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Spa
@@ -107,6 +108,7 @@ fun MasterControlBanner(
     onToggleProcessing: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenSessionDialog: () -> Unit,
+    onOpenArrangement: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val isCompact = LocalConfiguration.current.screenWidthDp < BANNER_COMPACT_SCREEN_WIDTH_DP
@@ -230,6 +232,23 @@ fun MasterControlBanner(
                         isLegacyPath = !viewModel.audio.streamMode.isMMapUsed,
                         onToggleProcessing = onToggleProcessing
                     )
+
+                    // Arrangement Button
+                    Box(
+                        modifier = Modifier
+                            .size(BANNER_SETTINGS_BUTTON_SIZE)
+                            .clip(CircleShape)
+                            .background(StudioSurfaceElevated)
+                            .clickable { onOpenArrangement() },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.LibraryMusic,
+                            contentDescription = "Arrangement",
+                            tint = if (viewModel.project.project.hasPlacements) SproutGreen else TextSecondary,
+                            modifier = Modifier.size(BANNER_SETTINGS_ICON_SIZE)
+                        )
+                    }
 
                     // Sessions Button
                     Box(
