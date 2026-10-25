@@ -91,13 +91,13 @@ public:
         mSequencer.setSettings(settings);
     }
 
-    void send(const ump::Packet& packet)
+    void send(const ump::Packet& packet, int32_t track = 0)
     {
-        mSequencer.recordInput(0, reinterpret_cast<const uint8_t*>(packet.mWords.data()), packet.mWordCount * ump::BYTES_PER_WORD);
+        mSequencer.recordInput(track, reinterpret_cast<const uint8_t*>(packet.mWords.data()), packet.mWordCount * ump::BYTES_PER_WORD);
     }
 
-    /** Renders blocks, polling the status as the UI does (it publishes what was recorded). */
-    std::vector<Played> run(int32_t blocks)
+    /** Renders blocks, polling the status as the UI does (it publishes what was recorded). Returns what a track's instrument plays. */
+    std::vector<Played> run(int32_t blocks, int32_t track = 0)
     {
         std::vector<Played> played;
         std::vector<float> audio(BLOCK_FRAMES * STEREO_CHANNEL_COUNT);
@@ -105,7 +105,7 @@ public:
         for (int32_t block = 0; block < blocks; block++) {
             mSequencer.getStatus();
             mSequencer.beginBlock(BLOCK_FRAMES, SAMPLE_RATE);
-            readSlotEvents(played);
+            readSlotEvents(played, track);
             mSequencer.renderMetronome(audio.data(), BLOCK_FRAMES);
             mFrame += BLOCK_FRAMES;
         }
@@ -119,10 +119,10 @@ public:
         return run(static_cast<int32_t>(frames / BLOCK_FRAMES));
     }
 
-    void readSlotEvents(std::vector<Played>& played) const
+    void readSlotEvents(std::vector<Played>& played, int32_t track = 0) const
     {
         int32_t wordCount = 0;
-        auto words = mSequencer.getSlotEvents(0, wordCount);
+        auto words = mSequencer.getSlotEvents(track, wordCount);
         uint32_t jrTicks = 0;
 
         for (int32_t i = 0; i < wordCount; i += ump::getWordCount(words[i])) {
@@ -553,6 +553,266 @@ void testUndoingEveryTakeWhileRecordingInAuto()
     CHECK(sequencer.getStatus().mLengthTicks > BAR);
 }
 
+SequenceEvent trackEvent(int64_t tick, int32_t track, const ump::Packet& packet, int32_t take = 0)
+{
+    return SequenceEvent{tick, track, take, 0, packet};
+}
+
+void testStartPlaybackFromTick()
+{
+    Harness harness(4);
+    auto& sequencer = harness.mSequencer;
+    sequencer.setEvents({event(0, noteOn(60)), event(BEAT, noteOff(60)),
+                         event(2 * BAR, noteOn(62)), event(2 * BAR + BEAT, noteOff(62))}, 4);
+    sequencer.startPlayback(2 * BAR);
+    auto played = harness.run(1);
+
+    // It starts at bar 3: the first note is behind it and the second plays at once
+    CHECK(countNoteOns(played) == 1);
+    CHECK(!played.empty() && ump::getNote(played[0].mWord0) == 62);
+    CHECK(sequencer.getPositionTick() >= 2 * BAR && sequencer.getPositionTick() < 2 * BAR + BEAT);
+}
+
+void testSeek()
+{
+    Harness harness(4);
+    auto& sequencer = harness.mSequencer;
+    sequencer.setEvents({event(0, noteOn(60)), event(BEAT, noteOff(60)),
+                         event(2 * BAR, noteOn(62)), event(2 * BAR + BEAT, noteOff(62))}, 4);
+
+    // Stopped: there is no playhead to move
+    sequencer.seek(BAR);
+    harness.run(1);
+    CHECK(sequencer.getStatus().mState == TransportState::STOPPED);
+    CHECK(sequencer.getPositionTick() == 0);
+
+    sequencer.startPlayback();
+    CHECK(countNoteOns(harness.run(1)) == 1);
+
+    sequencer.seek(2 * BAR);
+    auto played = harness.run(1);
+    CHECK(sequencer.getStatus().mState == TransportState::PLAYING);
+    CHECK(sequencer.getPositionTick() >= 2 * BAR && sequencer.getPositionTick() < 2 * BAR + BEAT);
+    // The note held when it jumped ends, then the note at bar 3 starts
+    CHECK(played.size() == 2);
+    CHECK(played.size() == 2 && !isNoteOn(played[0].mWord0) && ump::getNote(played[0].mWord0) == 60);
+    CHECK(played.size() == 2 && isNoteOn(played[1].mWord0) && ump::getNote(played[1].mWord0) == 62);
+}
+
+void testReplaceEventsWhilePlaying()
+{
+    Harness harness(1);
+    auto& sequencer = harness.mSequencer;
+    // A note held for most of the bar
+    sequencer.setEvents({event(0, noteOn(60)), event(BAR - BEAT, noteOff(60))}, 1);
+    sequencer.startPlayback();
+    harness.runTicks(BAR / 2);
+    auto position = sequencer.getPositionTick();
+    auto revision = sequencer.getStatus().mRevision;
+
+    CHECK(sequencer.replaceEvents({event(3 * BAR / 4, noteOn(64)), event(3 * BAR / 4 + BEAT / 2, noteOff(64))}, 1));
+    CHECK(sequencer.getStatus().mRevision != revision);
+    CHECK(sequencer.getStatus().mState == TransportState::PLAYING);
+    CHECK(sequencer.getEvents().size() == 2);
+
+    // The edit ends the note it cut off, and the transport carries on from where it was
+    auto played = harness.run(1);
+    CHECK(played.size() == 1 && !isNoteOn(played[0].mWord0) && ump::getNote(played[0].mWord0) == 60);
+    CHECK(sequencer.getPositionTick() > position);
+
+    auto rest = harness.runTicks(BAR / 2);
+    CHECK(countNoteOns(rest) == 1);
+}
+
+void testReplaceEventsIsRefusedWhileRecording()
+{
+    Harness harness(1);
+    auto& sequencer = harness.mSequencer;
+    sequencer.setEvents({event(0, noteOn(60)), event(BEAT, noteOff(60))}, 1);
+    sequencer.startRecording();
+    harness.run(1);
+
+    CHECK(!sequencer.replaceEvents({}, 1));
+    CHECK(sequencer.getEvents().size() == 2);
+
+    sequencer.stopRecording();
+    CHECK(sequencer.replaceEvents({}, 1));
+    CHECK(sequencer.getEvents().empty());
+}
+
+void testTracksPlayTheirOwnEvents()
+{
+    constexpr int32_t DRUMS = 0;
+    constexpr int32_t BASS = 3;
+    constexpr int32_t UNUSED = 5;
+    Harness harness(1);
+    auto& sequencer = harness.mSequencer;
+    sequencer.setEvents({trackEvent(0, DRUMS, noteOn(36)), trackEvent(BEAT, DRUMS, noteOff(36)),
+                         trackEvent(0, BASS, noteOn(40)), trackEvent(BEAT, BASS, noteOff(40)),
+                         trackEvent(BEAT, BASS, noteOn(43)), trackEvent(2 * BEAT, BASS, noteOff(43))}, 1);
+    sequencer.startPlayback();
+
+    // The tracks share the transport: render the same blocks and read each track's events
+    std::vector<Harness::Played> drums;
+    std::vector<Harness::Played> bass;
+    std::vector<Harness::Played> unused;
+    std::vector<float> audio(BLOCK_FRAMES * STEREO_CHANNEL_COUNT);
+    auto blocks = static_cast<int32_t>(ticksToFrames(BAR) / BLOCK_FRAMES);
+
+    for (int32_t block = 0; block < blocks; block++) {
+        sequencer.getStatus();
+        sequencer.beginBlock(BLOCK_FRAMES, SAMPLE_RATE);
+        harness.readSlotEvents(drums, DRUMS);
+        harness.readSlotEvents(bass, BASS);
+        harness.readSlotEvents(unused, UNUSED);
+        sequencer.renderMetronome(audio.data(), BLOCK_FRAMES);
+        harness.mFrame += BLOCK_FRAMES;
+    }
+
+    CHECK(countNoteOns(drums) == 1 && drums.size() == 2);
+    CHECK(countNoteOns(bass) == 2 && bass.size() == 4);
+    CHECK(unused.empty());
+
+    for (const auto& played : drums) {
+        CHECK(ump::getNote(played.mWord0) == 36);
+    }
+}
+
+void testRecordsEveryTrack()
+{
+    Harness harness(AUTO_LENGTH_BARS);
+    auto& sequencer = harness.mSequencer;
+    sequencer.startRecording();
+    harness.run(1);
+
+    harness.send(noteOn(60), 0);
+    harness.run(1);
+    harness.send(noteOn(64), 2);
+    harness.runTicks(BEAT);
+    harness.send(noteOff(60), 0);
+    harness.send(noteOff(64), 2);
+    // A track the rack does not have is not recorded
+    harness.send(noteOn(70), MAX_SEQUENCER_SLOTS);
+    sequencer.stopRecording();
+
+    auto events = sequencer.getEvents();
+    std::map<int32_t, int32_t> perTrack;
+
+    for (const auto& recorded : events) {
+        perTrack[recorded.mSlot]++;
+    }
+
+    CHECK(events.size() == 4);
+    CHECK(perTrack.size() == 2 && perTrack[0] == 2 && perTrack[2] == 2);
+}
+
+ump::Packet noteOnWithChance(int32_t note, int32_t percent)
+{
+    auto packet = noteOn(note);
+    setNoteProbability(packet, percent);
+    return packet;
+}
+
+struct ChanceRun
+{
+    std::vector<int32_t> mNoteOnsPerPass;
+    int32_t mNoteOns{0};
+    int32_t mNoteOffs{0};
+};
+
+/** Plays a one-bar loop with one note in the middle of it, passes times, and counts what was played. */
+ChanceRun playWithChance(uint32_t seed, int32_t percent, int32_t passes)
+{
+    Harness harness(1);
+    harness.mSequencer.setProbabilitySeed(seed);
+    harness.mSequencer.setEvents({event(BAR / 2, noteOnWithChance(60, percent)), event(BAR / 2 + BEAT, noteOff(60))}, 1);
+    harness.mSequencer.startPlayback();
+
+    ChanceRun run;
+
+    for (int32_t pass = 0; pass < passes; pass++) {
+        auto played = harness.runTicks(BAR);
+        auto noteOns = countNoteOns(played);
+
+        run.mNoteOnsPerPass.push_back(noteOns);
+        run.mNoteOns += noteOns;
+        run.mNoteOffs += static_cast<int32_t>(played.size()) - noteOns;
+    }
+
+    return run;
+}
+
+void testNoteProbabilityIsKeptInThePacket()
+{
+    auto packet = noteOn(60);
+
+    // Nothing set: the note always plays
+    CHECK(getNoteProbability(packet) == 100);
+
+    setNoteProbability(packet, 25);
+    CHECK(getNoteProbability(packet) == 25);
+    CHECK(packet.mWords[2] != 0);
+
+    // 100 percent is the absence of a setting, which keeps a sequence without chances as it was
+    setNoteProbability(packet, 100);
+    CHECK(getNoteProbability(packet) == 100);
+    CHECK(packet.mWords[2] == 0);
+
+    // 0 percent is a setting, not the absence of one
+    setNoteProbability(packet, 0);
+    CHECK(getNoteProbability(packet) == 0);
+    CHECK(packet.mWords[2] != 0);
+
+    setNoteProbability(packet, 250);
+    CHECK(getNoteProbability(packet) == 100);
+    setNoteProbability(packet, -5);
+    CHECK(getNoteProbability(packet) == 0);
+}
+
+void testANoteAlwaysPlaysAtOneHundredPercentAndNeverAtZero()
+{
+    constexpr int32_t PASSES = 20;
+
+    auto always = playWithChance(1, 100, PASSES);
+    CHECK(always.mNoteOns == PASSES);
+    CHECK(always.mNoteOffs == PASSES);
+
+    // The note-off of a note that was not played goes with it
+    auto never = playWithChance(1, 0, PASSES);
+    CHECK(never.mNoteOns == 0);
+    CHECK(never.mNoteOffs == 0);
+}
+
+void testTheChanceOfANoteFollowsItsPercentage()
+{
+    constexpr int32_t PASSES = 400;
+    constexpr int32_t TOLERANCE_PASSES = 40;
+    constexpr int32_t PERCENTS[] = {25, 50, 75};
+
+    for (auto percent : PERCENTS) {
+        auto run = playWithChance(7, percent, PASSES);
+
+        CHECK(std::abs(run.mNoteOns - PASSES * percent / 100) <= TOLERANCE_PASSES);
+        // Every note played ends, and the ones that were not played never send a note-off
+        CHECK(run.mNoteOffs == run.mNoteOns);
+    }
+}
+
+void testTheSeedMakesTheVariationReproducible()
+{
+    constexpr int32_t PASSES = 100;
+
+    auto first = playWithChance(5, 50, PASSES);
+    auto again = playWithChance(5, 50, PASSES);
+    auto other = playWithChance(6, 50, PASSES);
+
+    // The same seed plays the same song loop by loop, another seed another variation
+    CHECK(first.mNoteOnsPerPass == again.mNoteOnsPerPass);
+    CHECK(first.mNoteOnsPerPass != other.mNoteOnsPerPass);
+    // And the loops of a song differ among them: the note is played in some and not in others
+    CHECK(first.mNoteOns > 0 && first.mNoteOns < PASSES);
+}
+
 void testStandardMidiFile()
 {
     constexpr double FILE_BPM = 97.0;
@@ -628,6 +888,16 @@ int main()
     testPhrases();
     testUndoingEveryTakeWhileRecordingInAuto();
     testStandardMidiFile();
+    testStartPlaybackFromTick();
+    testSeek();
+    testReplaceEventsWhilePlaying();
+    testReplaceEventsIsRefusedWhileRecording();
+    testTracksPlayTheirOwnEvents();
+    testRecordsEveryTrack();
+    testNoteProbabilityIsKeptInThePacket();
+    testANoteAlwaysPlaysAtOneHundredPercentAndNeverAtZero();
+    testTheChanceOfANoteFollowsItsPercentage();
+    testTheSeedMakesTheVariationReproducible();
 
     if (gFailures > 0) {
         std::printf("%d failure(s)\n", gFailures);
