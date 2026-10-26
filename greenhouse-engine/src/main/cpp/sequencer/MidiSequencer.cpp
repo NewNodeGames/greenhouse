@@ -11,6 +11,37 @@ namespace greenhouse
 namespace
 {
 
+// A roll of the chance of a note is a hash of everything that identifies the note and the loop it plays in:
+// no state to share between threads, and the same result however the song was reached
+constexpr uint32_t HASH_MIX_MULTIPLIER_A = 0x85ebca6bu;
+constexpr uint32_t HASH_MIX_MULTIPLIER_B = 0xc2b2ae35u;
+constexpr uint32_t HASH_MIX_SHIFT_A = 16;
+constexpr uint32_t HASH_MIX_SHIFT_B = 13;
+// So that a seed of 0 is a seed like any other
+constexpr uint32_t SEED_OFFSET = 0x9e3779b9u;
+constexpr uint32_t SLOT_SHIFT = 8;
+constexpr uint32_t PERCENT_RANGE = 100;
+
+uint32_t mixBits(uint32_t value)
+{
+    value ^= value >> HASH_MIX_SHIFT_A;
+    value *= HASH_MIX_MULTIPLIER_A;
+    value ^= value >> HASH_MIX_SHIFT_B;
+    value *= HASH_MIX_MULTIPLIER_B;
+    value ^= value >> HASH_MIX_SHIFT_A;
+    return value;
+}
+
+/** A number from 0 to 99 that only depends on the arguments. */
+uint32_t rollPercent(uint32_t seed, int64_t tick, int32_t slot, uint32_t note, int32_t loopIndex)
+{
+    auto hash = mixBits(seed + SEED_OFFSET);
+    hash = mixBits(hash ^ static_cast<uint32_t>(tick));
+    hash = mixBits(hash ^ ((static_cast<uint32_t>(slot) << SLOT_SHIFT) | note));
+    hash = mixBits(hash ^ static_cast<uint32_t>(loopIndex));
+    return hash % PERCENT_RANGE;
+}
+
 // The published playhead packs the loop pass above the tick position
 constexpr uint32_t PLAYHEAD_TICK_BITS = 40;
 constexpr uint64_t PLAYHEAD_TICK_MASK = (uint64_t{1} << PLAYHEAD_TICK_BITS) - 1;
@@ -145,11 +176,28 @@ SequencerSettings MidiSequencer::getSettings()
     return mSettings;
 }
 
-void MidiSequencer::startPlayback()
+void MidiSequencer::setProbabilitySeed(uint32_t seed)
+{
+    mProbabilitySeed.store(seed, std::memory_order_relaxed);
+}
+
+void MidiSequencer::startPlayback(int64_t fromTick)
 {
     std::lock_guard<std::mutex> lock(mMutex);
     commitTakeLocked();
-    pushCommandLocked(Command::PLAY);
+    pushCommandLocked(Command::PLAY, std::max<int64_t>(0, fromTick));
+}
+
+void MidiSequencer::seek(int64_t tick)
+{
+    std::lock_guard<std::mutex> lock(mMutex);
+
+    // A recording follows the playhead from its start: moving it would break the take
+    if (mRecordingTake != NO_TAKE || getRequestedStateLocked() != TransportState::PLAYING) {
+        return;
+    }
+
+    pushCommandLocked(Command::SEEK, std::max<int64_t>(0, tick));
 }
 
 void MidiSequencer::startRecording()
@@ -340,7 +388,23 @@ void MidiSequencer::setEvents(std::vector<SequenceEvent> events, int32_t autoLen
 {
     std::lock_guard<std::mutex> lock(mMutex);
     stopLocked();
+    setEventsLocked(std::move(events), autoLengthBars);
+}
 
+bool MidiSequencer::replaceEvents(std::vector<SequenceEvent> events, int32_t autoLengthBars)
+{
+    std::lock_guard<std::mutex> lock(mMutex);
+
+    if (mRecordingTake != NO_TAKE) {
+        return false;
+    }
+
+    setEventsLocked(std::move(events), autoLengthBars);
+    return true;
+}
+
+void MidiSequencer::setEventsLocked(std::vector<SequenceEvent> events, int32_t autoLengthBars)
+{
     events.erase(std::remove_if(events.begin(), events.end(), [](const SequenceEvent& event) {
         return !isValidSlot(event.mSlot) || event.mTick < 0 || event.mPacket.mWordCount <= 0 ||
                event.mPacket.mWordCount != ump::getWordCount(event.mPacket.mWords[0]);
@@ -660,7 +724,7 @@ void MidiSequencer::eventsRemovedLocked()
     commitChangeLocked(true);
 }
 
-void MidiSequencer::pushCommandLocked(Command command)
+void MidiSequencer::pushCommandLocked(Command command, int64_t tick)
 {
     auto write = mCommandWrite.load(std::memory_order_relaxed);
 
@@ -670,6 +734,7 @@ void MidiSequencer::pushCommandLocked(Command command)
     }
 
     mCommands[write % TRANSPORT_COMMAND_CAPACITY] = command;
+    mCommandTicks[write % TRANSPORT_COMMAND_CAPACITY] = tick;
     mCommandWrite.store(write + 1, std::memory_order_release);
 
     switch (command) {
@@ -682,6 +747,8 @@ void MidiSequencer::pushCommandLocked(Command command)
             break;
         case Command::STOP:
             mRequestedState = TransportState::STOPPED;
+            break;
+        case Command::SEEK:
             break;
     }
 }
@@ -793,7 +860,7 @@ void MidiSequencer::processCommands()
     for (; read != write; read++) {
         switch (mCommands[read % TRANSPORT_COMMAND_CAPACITY]) {
             case Command::PLAY:
-                resetTransport(TransportState::PLAYING);
+                resetTransport(TransportState::PLAYING, mCommandTicks[read % TRANSPORT_COMMAND_CAPACITY]);
                 break;
             case Command::ARM:
                 resetTransport(TransportState::ARMED);
@@ -801,6 +868,15 @@ void MidiSequencer::processCommands()
             case Command::ROLL:
                 if (mState == TransportState::ARMED) {
                     mState = TransportState::PLAYING;
+                }
+
+                break;
+            case Command::SEEK:
+                if (mState == TransportState::PLAYING) {
+                    // A new pass: what an earlier recording played in this one is heard again
+                    releaseHeldNotes();
+                    mPositionFrames = tickToFrame(mCommandTicks[read % TRANSPORT_COMMAND_CAPACITY]);
+                    mPass++;
                 }
 
                 break;
@@ -813,13 +889,14 @@ void MidiSequencer::processCommands()
     mCommandRead.store(read, std::memory_order_release);
 }
 
-/** Moves to state at the start of the sequence, releasing the notes held. */
-void MidiSequencer::resetTransport(TransportState state)
+/** Moves to state at startTick of the sequence, releasing the notes held. */
+void MidiSequencer::resetTransport(TransportState state, int64_t startTick)
 {
     releaseHeldNotes();
     mState = state;
-    mPositionFrames = 0;
+    mPositionFrames = startTick > 0 ? tickToFrame(startTick) : 0;
     mPass = 0;
+    mLoopIndex = 0;
 }
 
 /** Plays the block in segments that end at the loop end or the block end. The metronome clicks while recording. */
@@ -848,6 +925,7 @@ void MidiSequencer::advance(const PlaybackBuffer& buffer, int32_t frames)
         if (mPositionFrames >= boundary) {
             mPositionFrames %= lengthFrames;
             mPass++;
+            mLoopIndex++;
         }
     }
 }
@@ -877,6 +955,11 @@ void MidiSequencer::emitEvents(const PlaybackBuffer& buffer, int64_t segmentStar
             continue;
         }
 
+        // A note that does not come up is not played, and its note-off is dropped below: it was never started
+        if (!isNotePlayed(*it)) {
+            continue;
+        }
+
         // Notes are tracked only once sent: an event that does not fit the block leaves them as they were
         auto& playingNotes = mPlayingNotes[it->mSlot];
         auto frameOffset = blockOffset + static_cast<int32_t>(frame - segmentStart);
@@ -891,6 +974,29 @@ void MidiSequencer::emitEvents(const PlaybackBuffer& buffer, int64_t segmentStar
             playingNotes.track(it->mPacket);
         }
     }
+}
+
+/** Whether the event is played this loop: any event but a note-on with a chance below 100 percent always is. */
+bool MidiSequencer::isNotePlayed(const SequenceEvent& event) const
+{
+    auto word0 = event.mPacket.mWords[0];
+
+    if (ump::getMessageType(word0) != ump::MESSAGE_TYPE_MIDI2_CHANNEL_VOICE || ump::getStatus(word0) != ump::STATUS_NOTE_ON) {
+        return true;
+    }
+
+    auto percent = getNoteProbability(event.mPacket);
+
+    if (percent >= ALWAYS_PLAYED_PERCENT) {
+        return true;
+    }
+
+    if (percent <= NEVER_PLAYED_PERCENT) {
+        return false;
+    }
+
+    auto seed = mProbabilitySeed.load(std::memory_order_relaxed);
+    return static_cast<int32_t>(rollPercent(seed, event.mTick, event.mSlot, ump::getNote(word0), mLoopIndex)) < percent;
 }
 
 void MidiSequencer::scheduleClicks(int64_t segmentStart, int64_t segmentEnd, int32_t blockOffset)

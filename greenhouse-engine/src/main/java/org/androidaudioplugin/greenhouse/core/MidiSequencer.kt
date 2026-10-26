@@ -35,6 +35,8 @@ data class SequencerStatus(
  * Kotlin side of the native MIDI sequencer owned by the [RackEngine]: it records the notes played on
  * the rack and plays them back in a loop, in time with the audio. Events and timing live in native code; this
  * class only drives it. Thread-safe.
+ *
+ * An event's slot is the index of its track: it plays on that track's instrument.
  */
 class MidiSequencer internal constructor() {
     companion object {
@@ -58,6 +60,9 @@ class MidiSequencer internal constructor() {
         const val EVENT_TAKE = 2
         const val EVENT_WORDS = 4
         const val EVENT_STRIDE = 8
+
+        /** Tracks the sequencer plays: the rack's. */
+        const val MAX_TRACKS = RackEngine.MAX_TRACKS
 
         // Layouts shared with MidiSequencerJni.cpp
         private const val SETTINGS_BPM = 0
@@ -130,6 +135,20 @@ class MidiSequencer internal constructor() {
     external fun startPlayback()
 
     /**
+     * Seeds the chance of notes: a note that has a probability below 100 percent is played or not by a roll that
+     * only depends on the seed, the place of the note in the song and the loop it is in (counted from where
+     * playing started). The same seed plays the same song each time it starts from the beginning; another seed
+     * is another variation.
+     */
+    external fun setProbabilitySeed(seed: Int)
+
+    /** Plays from [tick]. Ends recording. The engine must be running. */
+    external fun startPlaybackFrom(tick: Long)
+
+    /** Moves the playhead to [tick] while playing, ending the notes held. Ignored when not playing or while recording. */
+    external fun seek(tick: Long)
+
+    /**
      * When stopped, starts recording at the first note played; when playing, punches in. The
      * metronome clicks while recording. The engine must be running.
      */
@@ -157,6 +176,12 @@ class MidiSequencer internal constructor() {
      * [autoLengthBars]: the loop length while the length setting is AUTO, as in [SequencerStatus]; 0 fits the events.
      */
     external fun setEvents(packed: IntArray, autoLengthBars: Int)
+
+    /**
+     * Like [setEvents], but the transport keeps running: the playhead stays where it is and the notes held
+     * end, so the new events play from the next one on. Returns false, changing nothing, while recording.
+     */
+    external fun replaceEvents(packed: IntArray, autoLengthBars: Int): Boolean
 
     /** The sequence as it plays (quantized when quantize is on) as a Standard MIDI File, one track per slot. */
     external fun exportStandardMidiFile(): ByteArray

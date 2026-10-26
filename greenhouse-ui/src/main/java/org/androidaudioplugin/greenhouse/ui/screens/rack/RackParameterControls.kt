@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -24,8 +25,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Casino
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -90,6 +94,15 @@ private const val HOST_CONTROL_CARD_SPAN = 3
 private const val COMPACT_HOST_CONTROL_CARD_SPAN = 1
 // The filter button lines up with the parameter cards below, like the host control
 private const val FILTER_BUTTON_CARD_SPAN = 1
+// The button that randomizes the parameters floats over the corner of the grid, which leaves room under its last line
+private val RANDOMIZE_BUTTON_SIZE = 40.dp
+private val RANDOMIZE_BUTTON_MARGIN = 10.dp
+private val RANDOMIZE_STRENGTHS = listOf(
+    "Subtle (25%)" to 0.25,
+    "Medium (50%)" to 0.5,
+    "Strong (75%)" to 0.75,
+    "Full (100%)" to 1.0
+)
 
 private fun formatFastDecimal(value: Double, decimals: Int): String {
     if (decimals == 1) {
@@ -124,6 +137,11 @@ fun ParameterControlRack(
     parameterValues: Map<Int, Double>,
     gridState: LazyGridState,
     onValueChange: (ParameterInformation, Double) -> Unit,
+    /** Whether [onUndoRandomize] has anything to bring back. */
+    canUndoRandomize: Boolean,
+    /** Gives the parameters new random values, as far from the current ones as the strength (0 to 1) allows. */
+    onRandomize: (strength: Double) -> Unit,
+    onUndoRandomize: () -> Unit,
     /** Host control of the slot, filling the width it is given; compact while the search field shares its line. */
     hostControl: @Composable (isCompact: Boolean) -> Unit,
     modifier: Modifier = Modifier
@@ -352,6 +370,7 @@ fun ParameterControlRack(
                 LazyVerticalGrid(
                     columns = GridCells.Fixed(GRID_COLUMN_COUNT),
                     state = gridState,
+                    contentPadding = PaddingValues(bottom = RANDOMIZE_BUTTON_SIZE + RANDOMIZE_BUTTON_MARGIN),
                     horizontalArrangement = Arrangement.spacedBy(GRID_SPACING),
                     verticalArrangement = Arrangement.spacedBy(GRID_SPACING),
                     modifier = Modifier
@@ -389,7 +408,68 @@ fun ParameterControlRack(
                         .width(SCROLLBAR_WIDTH)
                         .padding(vertical = SCROLLBAR_TRACK_PADDING)
                 )
+
+                RandomizeButton(
+                    canUndo = canUndoRandomize,
+                    onRandomize = onRandomize,
+                    onUndo = onUndoRandomize,
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(end = GRID_END_PADDING + RANDOMIZE_BUTTON_MARGIN, bottom = RANDOMIZE_BUTTON_MARGIN)
+                )
             }
+        }
+    }
+}
+
+/** A dice that opens the choice of how strongly to randomize the parameters, and the way back from the last one. */
+@Composable
+private fun RandomizeButton(
+    canUndo: Boolean,
+    onRandomize: (Double) -> Unit,
+    onUndo: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    var isMenuOpen by remember { mutableStateOf(false) }
+
+    Box(modifier = modifier) {
+        Box(
+            modifier = Modifier
+                .size(RANDOMIZE_BUTTON_SIZE)
+                .controlSurface()
+                .clickable { isMenuOpen = true },
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Casino,
+                contentDescription = "Randomize parameters",
+                tint = TextSecondary,
+                modifier = Modifier.size(TOOLBAR_ICON_SIZE)
+            )
+        }
+
+        DropdownMenu(
+            expanded = isMenuOpen,
+            onDismissRequest = { isMenuOpen = false }
+        ) {
+            for ((label, strength) in RANDOMIZE_STRENGTHS) {
+                DropdownMenuItem(
+                    text = { Text(text = label) },
+                    onClick = {
+                        isMenuOpen = false
+                        onRandomize(strength)
+                    }
+                )
+            }
+
+            DropdownMenuItem(
+                text = { Text(text = "Undo randomize") },
+                enabled = canUndo,
+                onClick = {
+                    isMenuOpen = false
+                    onUndo()
+                }
+            )
         }
     }
 }

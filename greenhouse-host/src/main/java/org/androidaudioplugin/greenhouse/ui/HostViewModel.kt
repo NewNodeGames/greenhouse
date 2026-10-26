@@ -18,10 +18,12 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.androidaudioplugin.greenhouse.core.RackEngine
 import org.androidaudioplugin.greenhouse.device.DeviceInfo
 import org.androidaudioplugin.greenhouse.ui.host.AudioEngineController
 import org.androidaudioplugin.greenhouse.ui.host.MidiDeviceController
 import org.androidaudioplugin.greenhouse.ui.host.PluginBrowserController
+import org.androidaudioplugin.greenhouse.ui.host.ProjectController
 import org.androidaudioplugin.greenhouse.ui.host.RackController
 import org.androidaudioplugin.greenhouse.ui.host.RackMeters
 import org.androidaudioplugin.greenhouse.ui.host.RackSessionController
@@ -60,16 +62,17 @@ class HostViewModel(application: Application, config: HostConfig) : AndroidViewM
 
     private val postStatus: (String) -> Unit = { statusMessage = it }
 
-    private val sources = config.createSources(application, RackController.NUM_RACK_SLOTS)
+    private val sources = config.createSources(application, RackEngine.DEFAULT_NUM_RACK_SLOTS)
 
-    val audio = AudioEngineController(RackController.NUM_RACK_SLOTS, postStatus)
-    val meters = RackMeters(RackController.NUM_RACK_SLOTS)
+    val audio = AudioEngineController(RackEngine.DEFAULT_NUM_TRACKS, postStatus)
+    val meters = RackMeters(audio.engine.numSlots)
     val rack = RackController(sources, audio, viewModelScope, postStatus)
     val browser = PluginBrowserController(sources, viewModelScope, postStatus)
     val keyboard = VirtualKeyboardController(audio.engine)
     val midi = MidiDeviceController(application, viewModelScope, audio.engine, keyboard, postStatus)
-    val sequencer = SequencerController(application, audio, viewModelScope, postStatus)
-    val sessions = RackSessionController(application, rack, audio, browser, sequencer, viewModelScope, postStatus)
+    val project = ProjectController(audio, postStatus)
+    val sequencer = SequencerController(application, audio, project, viewModelScope, postStatus)
+    val sessions = RackSessionController(application, rack, audio, browser, sequencer, project, viewModelScope, postStatus)
 
     init {
         sessions.refreshSavedSessions()
