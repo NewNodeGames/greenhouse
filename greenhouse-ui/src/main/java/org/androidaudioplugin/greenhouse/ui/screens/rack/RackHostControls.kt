@@ -1,5 +1,6 @@
 package org.androidaudioplugin.greenhouse.ui.screens.rack
 
+import org.androidaudioplugin.greenhouse.core.RackEngine
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -21,7 +22,6 @@ import org.androidaudioplugin.greenhouse.ui.components.HostFader
 import org.androidaudioplugin.greenhouse.ui.components.LevelFader
 import org.androidaudioplugin.greenhouse.ui.components.controlSurface
 import org.androidaudioplugin.greenhouse.ui.components.formatLevelDb
-import org.androidaudioplugin.greenhouse.ui.host.RackController
 import org.androidaudioplugin.greenhouse.ui.theme.tabularTextStyle
 import org.androidaudioplugin.greenhouse.ui.theme.SproutGreen
 import org.androidaudioplugin.greenhouse.ui.theme.TextSecondary
@@ -50,7 +50,7 @@ fun HostControl(
     modifier: Modifier = Modifier,
     isCompact: Boolean = false
 ) {
-    val isInstrument = slot.index == RackController.INSTRUMENT_SLOT_INDEX
+    val isInstrument = RackEngine.isInstrumentSlot(slot.index)
 
     Row(
         modifier = modifier

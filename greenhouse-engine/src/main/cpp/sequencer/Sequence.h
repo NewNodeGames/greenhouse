@@ -1,5 +1,6 @@
 #pragma once
 
+#include "engine/TrackLayout.h"
 #include "sequencer/Ump.h"
 #include <algorithm>
 #include <cstdint>
@@ -22,9 +23,10 @@ constexpr double SECONDS_PER_MINUTE = 60.0;
 constexpr int32_t AUTO_LENGTH_BARS = 0;
 constexpr int32_t MAX_SEQUENCE_LENGTH_BARS = 999;
 constexpr int32_t MAX_SEQUENCE_EVENTS = 65536;
-// Slots the sequencer records and plays. Only the instrument slot gets notes; events, sessions and
-// .mid files keep a slot index so this can grow (e.g. for automation on effect slots).
-constexpr int32_t MAX_SEQUENCER_SLOTS = 1;
+// Slots the sequencer records and plays: one per track, each sending its notes to the track's instrument
+// (an event's slot is its track index). Events, sessions and .mid files keep a slot index so this can
+// grow (e.g. for automation on effect slots).
+constexpr int32_t MAX_SEQUENCER_SLOTS = MAX_TRACKS;
 
 constexpr int32_t NO_TAKE = -1;
 constexpr int32_t DEFAULT_QUANTIZE_TICKS = SEQUENCER_PPQ / 4; // 1/16
@@ -45,7 +47,7 @@ struct SequencerSettings
     float mMetronomeLevelDb{DEFAULT_METRONOME_LEVEL_DB};
 };
 
-/** A MIDI event of the sequence: a UMP packet sent to a rack slot at a musical position. */
+/** A MIDI event of the sequence: a UMP packet sent to a track's instrument at a musical position. */
 struct SequenceEvent
 {
     int64_t mTick{0};
@@ -55,6 +57,37 @@ struct SequenceEvent
     int32_t mRecordedPass{0};
     ump::Packet mPacket;
 };
+
+// The chance a note is played, in percent, is kept in the third word of its note-on packet, which a MIDI 2.0 note
+// does not use: it never reaches a plugin, and a sequence saved without it plays every note. A flag marks it as
+// set, so that a packet with nothing there is a note that always plays.
+constexpr int32_t PROBABILITY_WORD_INDEX = 2;
+constexpr uint32_t PROBABILITY_SET_FLAG = 0x80000000u;
+constexpr uint32_t PROBABILITY_PERCENT_MASK = 0xFFu;
+constexpr int32_t ALWAYS_PLAYED_PERCENT = 100;
+constexpr int32_t NEVER_PLAYED_PERCENT = 0;
+
+/** The chance the note of the packet is played, from 0 to 100 percent: 100 if none was set. */
+inline int32_t getNoteProbability(const ump::Packet& packet)
+{
+    auto word = packet.mWords[PROBABILITY_WORD_INDEX];
+
+    if ((word & PROBABILITY_SET_FLAG) == 0) {
+        return ALWAYS_PLAYED_PERCENT;
+    }
+
+    return std::min(static_cast<int32_t>(word & PROBABILITY_PERCENT_MASK), ALWAYS_PLAYED_PERCENT);
+}
+
+/** Sets the chance the note of the packet is played. 100 percent is the absence of a setting. */
+inline void setNoteProbability(ump::Packet& packet, int32_t percent)
+{
+    auto clamped = std::clamp(percent, NEVER_PLAYED_PERCENT, ALWAYS_PLAYED_PERCENT);
+
+    packet.mWords[PROBABILITY_WORD_INDEX] = clamped >= ALWAYS_PLAYED_PERCENT
+        ? 0u
+        : (PROBABILITY_SET_FLAG | static_cast<uint32_t>(clamped));
+}
 
 inline void sortByTick(std::vector<SequenceEvent>& events)
 {

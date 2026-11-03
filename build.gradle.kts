@@ -7,12 +7,27 @@ plugins {
 }
 
 
+// The ABIs native code is built for, and the libraries of which end up in the app: 64-bit ARM only, for now.
+// Change `greenhouse.abis` in gradle.properties (or pass -Pgreenhouse.abis=...) to build for more, as a
+// comma-separated list: arm64-v8a, armeabi-v7a, x86, x86_64. This covers every Android module, the ones of
+// the external aap-core included.
+val nativeAbis: List<String> = (findProperty("greenhouse.abis") as String?)
+    ?.split(",")
+    ?.map { it.trim() }
+    ?.filter { it.isNotEmpty() }
+    ?: listOf("arm64-v8a")
+
 subprojects {
     group = "org.androidaudioplugin"
 
     plugins.withId("com.android.library") {
         extensions.configure<com.android.build.api.dsl.LibraryExtension> {
             defaultConfig {
+                ndk {
+                    abiFilters.clear()
+                    abiFilters.addAll(nativeAbis)
+                }
+
                 externalNativeBuild {
                     cmake {
                         arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384")
@@ -25,6 +40,11 @@ subprojects {
     plugins.withId("com.android.application") {
         extensions.configure<com.android.build.api.dsl.ApplicationExtension> {
             defaultConfig {
+                ndk {
+                    abiFilters.clear()
+                    abiFilters.addAll(nativeAbis)
+                }
+
                 externalNativeBuild {
                     cmake {
                         arguments("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384")

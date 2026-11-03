@@ -35,6 +35,30 @@ greenhouse::MidiSequencer& getSequencer()
     return greenhouse::getEngine().getSequencer();
 }
 
+/** The events of an array packed like getEvents(); the sequencer validates them. */
+std::vector<greenhouse::SequenceEvent> readEvents(JNIEnv* env, jintArray packed)
+{
+    auto length = packed != nullptr ? env->GetArrayLength(packed) : 0;
+    std::vector<jint> values(static_cast<size_t>(length));
+    std::vector<greenhouse::SequenceEvent> events;
+
+    if (length > 0) {
+        env->GetIntArrayRegion(packed, 0, length, values.data());
+    }
+
+    for (jsize base = 0; base + EVENT_STRIDE <= length; base += EVENT_STRIDE) {
+        greenhouse::SequenceEvent event;
+        event.mTick = values[base + EVENT_TICK];
+        event.mSlot = values[base + EVENT_SLOT];
+        event.mTake = values[base + EVENT_TAKE];
+        event.mPacket.mWordCount = values[base + EVENT_WORD_COUNT];
+        std::copy_n(values.begin() + base + EVENT_WORDS, greenhouse::ump::MAX_PACKET_WORDS, event.mPacket.mWords.begin());
+        events.push_back(event);
+    }
+
+    return events;
+}
+
 } // namespace
 
 extern "C" {
@@ -111,6 +135,27 @@ Java_org_androidaudioplugin_greenhouse_core_MidiSequencer_startPlayback(
 }
 
 JNIEXPORT void JNICALL
+Java_org_androidaudioplugin_greenhouse_core_MidiSequencer_setProbabilitySeed(
+        JNIEnv* env, jobject thiz, jint seed)
+{
+    getSequencer().setProbabilitySeed(static_cast<uint32_t>(seed));
+}
+
+JNIEXPORT void JNICALL
+Java_org_androidaudioplugin_greenhouse_core_MidiSequencer_startPlaybackFrom(
+        JNIEnv* env, jobject thiz, jlong tick)
+{
+    getSequencer().startPlayback(tick);
+}
+
+JNIEXPORT void JNICALL
+Java_org_androidaudioplugin_greenhouse_core_MidiSequencer_seek(
+        JNIEnv* env, jobject thiz, jlong tick)
+{
+    getSequencer().seek(tick);
+}
+
+JNIEXPORT void JNICALL
 Java_org_androidaudioplugin_greenhouse_core_MidiSequencer_startRecording(
         JNIEnv* env, jobject thiz)
 {
@@ -175,26 +220,14 @@ JNIEXPORT void JNICALL
 Java_org_androidaudioplugin_greenhouse_core_MidiSequencer_setEvents(
         JNIEnv* env, jobject thiz, jintArray packed, jint autoLengthBars)
 {
-    auto length = packed != nullptr ? env->GetArrayLength(packed) : 0;
-    std::vector<jint> values(static_cast<size_t>(length));
-    std::vector<greenhouse::SequenceEvent> events;
+    getSequencer().setEvents(readEvents(env, packed), autoLengthBars);
+}
 
-    if (length > 0) {
-        env->GetIntArrayRegion(packed, 0, length, values.data());
-    }
-
-    // Validated by the sequencer
-    for (jsize base = 0; base + EVENT_STRIDE <= length; base += EVENT_STRIDE) {
-        greenhouse::SequenceEvent event;
-        event.mTick = values[base + EVENT_TICK];
-        event.mSlot = values[base + EVENT_SLOT];
-        event.mTake = values[base + EVENT_TAKE];
-        event.mPacket.mWordCount = values[base + EVENT_WORD_COUNT];
-        std::copy_n(values.begin() + base + EVENT_WORDS, greenhouse::ump::MAX_PACKET_WORDS, event.mPacket.mWords.begin());
-        events.push_back(event);
-    }
-
-    getSequencer().setEvents(std::move(events), autoLengthBars);
+JNIEXPORT jboolean JNICALL
+Java_org_androidaudioplugin_greenhouse_core_MidiSequencer_replaceEvents(
+        JNIEnv* env, jobject thiz, jintArray packed, jint autoLengthBars)
+{
+    return getSequencer().replaceEvents(readEvents(env, packed), autoLengthBars) ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jbyteArray JNICALL

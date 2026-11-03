@@ -188,8 +188,18 @@ public:
     void setSettings(const SequencerSettings& settings);
     SequencerSettings getSettings();
 
-    /** Plays from the start. Ends recording. */
-    void startPlayback();
+    /**
+     * Seeds the chance of notes: a note with a probability below 100 percent is played or not by a roll that
+     * only depends on the seed, where the note is in the song and the loop it is played in (counted from the
+     * start of playing). The same seed plays the same song every time it starts from the beginning; another
+     * seed is another variation. The roll is not random state, so seeking, or editing, does not disturb it.
+     */
+    void setProbabilitySeed(uint32_t seed);
+
+    /** Plays from fromTick (the start by default). Ends recording. */
+    void startPlayback(int64_t fromTick = 0);
+    /** Moves the playhead to tick while playing, ending the notes held. Ignored when not playing or while recording. */
+    void seek(int64_t tick);
     /** When stopped, starts at the first note played; when playing, punches in. The metronome clicks while recording. */
     void startRecording();
     /** Punches out: playback continues. Armed, it stops the transport. */
@@ -222,6 +232,12 @@ public:
      * loop length while the length setting is AUTO_LENGTH_BARS (0: fit the events).
      */
     void setEvents(std::vector<SequenceEvent> events, int32_t autoLengthBars);
+    /**
+     * Like setEvents(), but the transport keeps running: the playhead stays where it is and the notes
+     * held are ended, so the new events play from the next one on. Use it to edit the sequence while
+     * it plays. Returns false, changing nothing, while recording.
+     */
+    bool replaceEvents(std::vector<SequenceEvent> events, int32_t autoLengthBars);
 
     /** The sequence as it plays (quantized when quantize is on), as a Standard MIDI File. */
     std::vector<uint8_t> exportStandardMidiFile();
@@ -255,6 +271,7 @@ private:
         PLAY,
         ARM,
         ROLL, // the first note of an armed recording arrived
+        SEEK, // move the playhead to the command's tick
         STOP
     };
 
@@ -295,7 +312,9 @@ private:
     void eventsRemovedLocked();
     void stopLocked();
     void resetAudioStateLocked();
-    void pushCommandLocked(Command command);
+    void pushCommandLocked(Command command, int64_t tick = 0);
+    bool isNotePlayed(const SequenceEvent& event) const;
+    void setEventsLocked(std::vector<SequenceEvent> events, int32_t autoLengthBars);
     bool hasPendingCommandsLocked() const;
     TransportState getRequestedStateLocked() const;
     bool isAwaitingFirstNoteLocked() const;
@@ -305,7 +324,7 @@ private:
 
     // Audio thread
     void processCommands();
-    void resetTransport(TransportState state);
+    void resetTransport(TransportState state, int64_t startTick = 0);
     void advance(const PlaybackBuffer& buffer, int32_t frames);
     void emitEvents(const PlaybackBuffer& buffer, int64_t segmentStart, int64_t segmentEnd, int32_t blockOffset);
     void scheduleClicks(int64_t segmentStart, int64_t segmentEnd, int32_t blockOffset);
@@ -341,10 +360,13 @@ private:
     // -- Shared with the audio thread --
     std::atomic<PlaybackBuffer*> mPublished{nullptr};
     std::atomic<double> mBpm{DEFAULT_SEQUENCER_BPM};
+    std::atomic<uint32_t> mProbabilitySeed{0};
     // Linear, from the level in dB (set from the default settings on construction)
     std::atomic<float> mMetronomeGain{METRONOME_SILENT_GAIN};
     // Single-producer (control thread, under mMutex), single-consumer (audio thread) queue
     std::array<Command, TRANSPORT_COMMAND_CAPACITY> mCommands{};
+    // The tick a PLAY or SEEK command goes to, written with the command
+    std::array<int64_t, TRANSPORT_COMMAND_CAPACITY> mCommandTicks{};
     std::atomic<uint32_t> mCommandWrite{0};
     std::atomic<uint32_t> mCommandRead{0};
     // Written by the audio thread after each block: where the next block starts
@@ -357,6 +379,9 @@ private:
     TransportState mState{TransportState::STOPPED};
     int64_t mPositionFrames{0};
     int32_t mPass{0};
+    // Loops played since playing started: what the roll for the chance of notes follows. Unlike mPass, it does
+    // not move when the playhead is moved.
+    int32_t mLoopIndex{0};
     double mFramesPerTick{0.0};
     int32_t mBlockSampleRate{DEFAULT_SAMPLE_RATE};
     uint64_t mAppliedFlushSerial{0};

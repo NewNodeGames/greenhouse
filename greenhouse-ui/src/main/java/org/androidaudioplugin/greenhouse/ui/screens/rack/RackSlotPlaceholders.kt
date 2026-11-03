@@ -1,5 +1,6 @@
 package org.androidaudioplugin.greenhouse.ui.screens.rack
 
+import org.androidaudioplugin.greenhouse.core.RackEngine
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
@@ -58,7 +59,7 @@ fun NoPluginInSlotView(
 
             Spacer(modifier = Modifier.height(4.dp))
 
-            val placeholderSubtitle = if (slot.index == 0) {
+            val placeholderSubtitle = if (RackEngine.isInstrumentSlot(slot.index)) {
                 "Plant an instrument plugin to start playing."
             } else {
                 "Give your melody room to breathe and expand."
@@ -91,7 +92,7 @@ fun PluginLoadingView(
     slot: RackSlotData,
     pluginName: String?
 ) {
-    val themeColor = if (slot.index == 0) {
+    val themeColor = if (RackEngine.isInstrumentSlot(slot.index)) {
         BlossomCoral
     } else {
         PeriwinkleBlue

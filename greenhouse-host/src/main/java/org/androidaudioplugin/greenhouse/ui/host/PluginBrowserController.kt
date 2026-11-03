@@ -1,5 +1,6 @@
 package org.androidaudioplugin.greenhouse.ui.host
 
+import org.androidaudioplugin.greenhouse.core.RackEngine
 import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -145,7 +146,7 @@ class PluginBrowserController(
             return true
         }
 
-        if (slotIndex == RackController.INSTRUMENT_SLOT_INDEX) {
+        if (RackEngine.isInstrumentSlot(slotIndex)) {
             return category == PluginCategory.SYNTH
         }
 

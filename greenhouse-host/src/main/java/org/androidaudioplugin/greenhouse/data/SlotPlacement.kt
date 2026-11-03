@@ -30,4 +30,47 @@ object SlotPlacement {
 
         return placed.sortedBy { it.slotIndex }
     }
+
+    // Sessions saved with several tracks before they said how many slots a track had: five, the instrument and
+    // four effects. A session with no more slots than that holds a single track.
+    private const val LEGACY_SLOTS_PER_TRACK = 5
+
+    /**
+     * Like [place], for a rack of tracks: [rackSlotsPerTrack] slots each, [rackSlotTypes] in all. A session
+     * says how many slots each of its tracks had ([savedSlotsPerTrack]): a slot goes to the same position of
+     * the same track, so tracks stay apart when the number of effects per track changes. A position the
+     * rack's tracks lack, or a track the rack lacks, is left out.
+     *
+     * Sessions that do not say ([savedSlotsPerTrack] null) are a single track unless they have more slots
+     * than the five a track then had: the slots of a single track follow their role, as in [place], within
+     * the first track of the rack.
+     */
+    fun placeInTracks(
+        saved: List<SlotState>,
+        savedSlotsPerTrack: Int?,
+        rackSlotTypes: List<String>,
+        rackSlotsPerTrack: Int
+    ): List<SlotState> {
+        val perTrack = savedSlotsPerTrack ?: if (saved.size > LEGACY_SLOTS_PER_TRACK) LEGACY_SLOTS_PER_TRACK else null
+
+        if (perTrack == null || perTrack <= 0) {
+            return place(saved, rackSlotTypes.take(rackSlotsPerTrack))
+        }
+
+        val rackTracks = rackSlotTypes.size / rackSlotsPerTrack
+        val placed = mutableListOf<SlotState>()
+
+        for (state in saved.sortedBy { it.slotIndex }) {
+            val track = state.slotIndex / perTrack
+            val position = state.slotIndex % perTrack
+
+            if (state.slotIndex < 0 || track >= rackTracks || position >= rackSlotsPerTrack) {
+                continue
+            }
+
+            placed.add(state.copy(slotIndex = track * rackSlotsPerTrack + position))
+        }
+
+        return placed
+    }
 }
