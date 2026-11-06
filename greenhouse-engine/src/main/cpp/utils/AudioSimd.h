@@ -147,6 +147,44 @@ inline void mixStereo(const float* wetL, const float* wetR, float* inOutInterlea
     }
 }
 
+/**
+ * Adds src * gain to inOutInterleaved (both interleaved stereo), the gain of each channel ramping linearly
+ * over the block from its start value to its end value at the last frame. This is how a track joins the master
+ * mix: its level and its pan are the gains of the two channels.
+ */
+inline void addStereoWithChannelGainRamps(const float* srcInterleaved, float* inOutInterleaved, int32_t numFrames,
+                                          float gainStartL, float gainEndL, float gainStartR, float gainEndR)
+{
+    auto frameCount = static_cast<float>(numFrames);
+    auto stepL = (gainEndL - gainStartL) / frameCount;
+    auto stepR = (gainEndR - gainStartR) / frameCount;
+    int32_t i = 0;
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    const float laneOffsets[4] = {1.0f, 2.0f, 3.0f, 4.0f};
+    float32x4_t offsets = vld1q_f32(laneOffsets);
+    float32x4_t baseL = vdupq_n_f32(gainStartL);
+    float32x4_t baseR = vdupq_n_f32(gainStartR);
+
+    for (; i <= numFrames - 4; i += 4) {
+        float32x4_t position = vaddq_f32(vdupq_n_f32(static_cast<float>(i)), offsets);
+        float32x4_t gainL = vmlaq_n_f32(baseL, position, stepL);
+        float32x4_t gainR = vmlaq_n_f32(baseR, position, stepR);
+        float32x4x2_t src = vld2q_f32(srcInterleaved + (i * 2));
+        float32x4x2_t dst = vld2q_f32(inOutInterleaved + (i * 2));
+        dst.val[0] = vmlaq_f32(dst.val[0], src.val[0], gainL);
+        dst.val[1] = vmlaq_f32(dst.val[1], src.val[1], gainR);
+        vst2q_f32(inOutInterleaved + (i * 2), dst);
+    }
+#endif
+
+    for (; i < numFrames; i++) {
+        auto position = static_cast<float>(i + 1);
+        inOutInterleaved[i * 2 + 0] += srcInterleaved[i * 2 + 0] * (gainStartL + stepL * position);
+        inOutInterleaved[i * 2 + 1] += srcInterleaved[i * 2 + 1] * (gainStartR + stepR * position);
+    }
+}
+
 /** False if any of the samples is NaN or infinite. */
 inline bool allFinite(const float* samples, int32_t numSamples)
 {

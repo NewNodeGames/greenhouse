@@ -103,6 +103,9 @@ class SlotUiState {
     /** When the host last edited each parameter, so plugin read-back doesn't fight the user's gesture. */
     val lastHostEditTimestamps = mutableMapOf<Int, Long>()
 
+    /** The values the parameters had before the last randomize, to go back to them; empty if there is nothing to undo. */
+    var randomizeUndo by mutableStateOf<List<Pair<ParameterInformation, Double>>>(emptyList())
+
     val nativeUiZoom = SlotNativeUiZoomState()
 
     var parameterGridState by mutableStateOf(LazyGridState())
@@ -115,6 +118,7 @@ class SlotUiState {
         parameterValues.clear()
         lastPluginValues.clear()
         lastHostEditTimestamps.clear()
+        randomizeUndo = emptyList()
         nativeUiZoom.reset()
         parameterGridState = LazyGridState()
         presetGridState = LazyGridState()

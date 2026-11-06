@@ -15,7 +15,7 @@ import java.util.Locale
  * pause-on-background / resume-on-foreground behaviour.
  */
 class AudioEngineController(
-    numSlots: Int,
+    numTracks: Int = RackEngine.DEFAULT_NUM_TRACKS,
     private val postStatus: (String) -> Unit
 ) : AutoCloseable {
     companion object {
@@ -32,7 +32,7 @@ class AudioEngineController(
     var framesPerCallback by mutableIntStateOf(DEFAULT_FRAMES_PER_CALLBACK)
         private set
 
-    val engine = RackEngine(framesPerCallback, numSlots)
+    val engine = RackEngine(framesPerCallback, numTracks)
 
     /** Rate plugins are prepared at: the output device's native rate, kept current by [syncWithEngine]. */
     var sampleRate by mutableIntStateOf(engine.sampleRate.takeIf { it > 0 } ?: DEFAULT_SAMPLE_RATE)

@@ -1,6 +1,7 @@
 package org.androidaudioplugin.greenhouse.data
 
 import org.androidaudioplugin.greenhouse.core.SequencerSettings
+import org.androidaudioplugin.greenhouse.project.Project
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -105,11 +106,19 @@ data class RackPreset(
     val slots: List<SlotState> = emptyList(),
     /** Absent from sessions saved before the sequencer existed. */
     val sequence: SequenceState? = null,
-    val customProperties: Map<String, String> = emptyMap()
+    val customProperties: Map<String, String> = emptyMap(),
+    /**
+     * The arrangement: the tracks with their clips. Absent from sessions saved before it existed, which
+     * only have a [sequence] (see `resolveProject()`). The [sequence] still holds the sequencer settings, and the
+     * song as flattened events for the versions that predate the arrangement.
+     */
+    val project: Project? = null,
+    /** How many slots each track of the saved rack had; absent from sessions saved before there were tracks (see `SlotPlacement`). */
+    val slotsPerTrack: Int? = null
 ) {
     companion object {
         const val FORMAT_IDENTIFIER = "greenhouse_rack_preset"
-        const val CURRENT_SCHEMA_VERSION = 1
+        const val CURRENT_SCHEMA_VERSION = 2
         const val FILE_EXTENSION = "ghrack"
         const val MIME_TYPE = "application/json"
     }

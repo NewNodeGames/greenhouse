@@ -2,6 +2,12 @@ package org.androidaudioplugin.greenhouse.data
 
 import android.util.Log
 import org.androidaudioplugin.greenhouse.core.SequencerSettings
+import org.androidaudioplugin.greenhouse.project.Clip
+import org.androidaudioplugin.greenhouse.project.ClipNoteCodec
+import org.androidaudioplugin.greenhouse.project.Placement
+import org.androidaudioplugin.greenhouse.project.Project
+import org.androidaudioplugin.greenhouse.project.Track
+import org.androidaudioplugin.greenhouse.project.sanitized
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -17,6 +23,7 @@ object RackStateSerializer {
     private const val KEY_CREATED_AT = "createdAt"
     private const val KEY_MODIFIED_AT = "modifiedAt"
     private const val KEY_SLOTS = "slots"
+    private const val KEY_SLOTS_PER_TRACK = "slotsPerTrack"
     private const val KEY_CUSTOM_PROPERTIES = "customProperties"
 
     private const val KEY_SLOT_INDEX = "slotIndex"
@@ -40,6 +47,20 @@ object RackStateSerializer {
     private const val KEY_METRONOME_LEVEL_DB = "metronomeLevelDb"
     private const val KEY_EVENTS_BASE64 = "eventsBase64"
     private const val KEY_AUTO_LENGTH_BARS = "autoLengthBars"
+
+    private const val KEY_PROJECT = "project"
+    private const val KEY_MIN_LENGTH_BARS = "minLengthBars"
+    private const val KEY_PROBABILITY_SEED = "probabilitySeed"
+    private const val KEY_TRACKS = "tracks"
+    private const val KEY_PAN = "pan"
+    private const val KEY_IS_MUTED = "isMuted"
+    private const val KEY_IS_SOLOED = "isSoloed"
+    private const val KEY_CLIPS = "clips"
+    private const val KEY_PLACEMENTS = "placements"
+    private const val KEY_ID = "id"
+    private const val KEY_CLIP_ID = "clipId"
+    private const val KEY_START_BAR = "startBar"
+    private const val KEY_NOTES_BASE64 = "notesBase64"
 
     fun serializeToJson(preset: RackPreset): String {
         val root = JSONObject()
@@ -87,10 +108,22 @@ object RackStateSerializer {
 
         root.put(KEY_SLOTS, slotsArray)
 
+        val slotsPerTrack = preset.slotsPerTrack
+
+        if (slotsPerTrack != null) {
+            root.put(KEY_SLOTS_PER_TRACK, slotsPerTrack)
+        }
+
         val sequence = preset.sequence
 
         if (sequence != null) {
             root.put(KEY_SEQUENCE, serializeSequence(sequence))
+        }
+
+        val project = preset.project
+
+        if (project != null) {
+            root.put(KEY_PROJECT, serializeProject(project))
         }
 
         val customPropsObj = JSONObject()
@@ -226,7 +259,9 @@ object RackStateSerializer {
                 modifiedAt = modifiedAt,
                 slots = slotsList,
                 sequence = root.optJSONObject(KEY_SEQUENCE)?.let { deserializeSequence(it) },
-                customProperties = customPropsMap
+                customProperties = customPropsMap,
+                project = root.optJSONObject(KEY_PROJECT)?.let { deserializeProject(it) },
+                slotsPerTrack = if (root.has(KEY_SLOTS_PER_TRACK)) root.optInt(KEY_SLOTS_PER_TRACK) else null
             )
         } catch (e: Throwable) {
             Log.e(TAG, "Failed to deserialize RackPreset from JSON", e)
@@ -264,5 +299,121 @@ object RackStateSerializer {
         }
 
         return SequenceState(settings, eventsBase64, sequenceObj.optInt(KEY_AUTO_LENGTH_BARS, 0))
+    }
+
+    private fun serializeProject(project: Project): JSONObject {
+        val projectObj = JSONObject()
+        projectObj.put(KEY_MIN_LENGTH_BARS, project.minLengthBars)
+        projectObj.put(KEY_PROBABILITY_SEED, project.probabilitySeed)
+
+        val tracksArray = JSONArray()
+
+        for (track in project.tracks) {
+            val trackObj = JSONObject()
+            trackObj.put(KEY_NAME, track.name)
+            trackObj.put(KEY_LEVEL_DB, track.levelDb.toDouble())
+            trackObj.put(KEY_PAN, track.pan.toDouble())
+            trackObj.put(KEY_IS_MUTED, track.isMuted)
+            trackObj.put(KEY_IS_SOLOED, track.isSoloed)
+
+            val clipsArray = JSONArray()
+
+            for (clip in track.clips) {
+                val clipObj = JSONObject()
+                clipObj.put(KEY_ID, clip.id)
+                clipObj.put(KEY_NAME, clip.name)
+                clipObj.put(KEY_LENGTH_BARS, clip.lengthBars)
+                clipObj.put(KEY_NOTES_BASE64, SequenceState.encodeEvents(ClipNoteCodec.pack(clip.notes)) ?: JSONObject.NULL)
+                clipsArray.put(clipObj)
+            }
+
+            trackObj.put(KEY_CLIPS, clipsArray)
+
+            val placementsArray = JSONArray()
+
+            for (placement in track.placements) {
+                val placementObj = JSONObject()
+                placementObj.put(KEY_ID, placement.id)
+                placementObj.put(KEY_CLIP_ID, placement.clipId)
+                placementObj.put(KEY_START_BAR, placement.startBar)
+                placementsArray.put(placementObj)
+            }
+
+            trackObj.put(KEY_PLACEMENTS, placementsArray)
+            tracksArray.put(trackObj)
+        }
+
+        projectObj.put(KEY_TRACKS, tracksArray)
+        return projectObj
+    }
+
+    /** What is read can be anything: the project is made consistent ([sanitized]) before it is used. */
+    private fun deserializeProject(projectObj: JSONObject): Project {
+        val tracks = mutableListOf<Track>()
+        val tracksArray = projectObj.optJSONArray(KEY_TRACKS)
+
+        if (tracksArray != null) {
+            for (i in 0 until tracksArray.length()) {
+                val trackObj = tracksArray.optJSONObject(i) ?: continue
+                tracks.add(deserializeTrack(trackObj, i))
+            }
+        }
+
+        val defaults = Project()
+        val minLengthBars = projectObj.optInt(KEY_MIN_LENGTH_BARS, defaults.minLengthBars)
+        val probabilitySeed = projectObj.optInt(KEY_PROBABILITY_SEED, defaults.probabilitySeed)
+        return Project(tracks.ifEmpty { defaults.tracks }, minLengthBars, probabilitySeed).sanitized()
+    }
+
+    private fun deserializeTrack(trackObj: JSONObject, index: Int): Track {
+        val clips = mutableListOf<Clip>()
+        val clipsArray = trackObj.optJSONArray(KEY_CLIPS)
+
+        if (clipsArray != null) {
+            for (i in 0 until clipsArray.length()) {
+                val clipObj = clipsArray.optJSONObject(i) ?: continue
+                val notesBase64 = if (clipObj.isNull(KEY_NOTES_BASE64)) {
+                    null
+                } else {
+                    clipObj.optString(KEY_NOTES_BASE64).ifBlank { null }
+                }
+
+                clips.add(
+                    Clip(
+                        id = clipObj.optInt(KEY_ID, i + 1),
+                        name = clipObj.optString(KEY_NAME, ""),
+                        lengthBars = clipObj.optInt(KEY_LENGTH_BARS, 1),
+                        notes = ClipNoteCodec.unpack(SequenceState.decodeEvents(notesBase64))
+                    )
+                )
+            }
+        }
+
+        val placements = mutableListOf<Placement>()
+        val placementsArray = trackObj.optJSONArray(KEY_PLACEMENTS)
+
+        if (placementsArray != null) {
+            for (i in 0 until placementsArray.length()) {
+                val placementObj = placementsArray.optJSONObject(i) ?: continue
+
+                placements.add(
+                    Placement(
+                        id = placementObj.optInt(KEY_ID, i + 1),
+                        clipId = placementObj.optInt(KEY_CLIP_ID, 0),
+                        startBar = placementObj.optInt(KEY_START_BAR, 0)
+                    )
+                )
+            }
+        }
+
+        return Track(
+            name = trackObj.optString(KEY_NAME, "Track ${index + 1}"),
+            clips = clips,
+            placements = placements,
+            levelDb = trackObj.optDouble(KEY_LEVEL_DB, SlotHostSettings.DEFAULT_LEVEL_DB.toDouble()).toFloat(),
+            pan = trackObj.optDouble(KEY_PAN, Track.CENTER_PAN.toDouble()).toFloat(),
+            isMuted = trackObj.optBoolean(KEY_IS_MUTED, false),
+            isSoloed = trackObj.optBoolean(KEY_IS_SOLOED, false)
+        )
     }
 }

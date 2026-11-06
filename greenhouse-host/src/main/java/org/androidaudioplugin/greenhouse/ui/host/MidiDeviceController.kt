@@ -26,7 +26,6 @@ class MidiDeviceController(
     companion object {
         const val MIDI_7BIT_MAX = 127f
         const val EVENT_TEXT_THROTTLE_MS = 50L
-        const val TARGET_SLOT_INDEX = RackController.INSTRUMENT_SLOT_INDEX
         const val ALL_NOTES = -1
     }
 
@@ -86,12 +85,12 @@ class MidiDeviceController(
         }
 
         override fun onPitchBend(value: Float) {
-            engine.sendPitchBend(TARGET_SLOT_INDEX, ALL_NOTES, value)
+            engine.sendPitchBend(engine.noteTargetSlot, ALL_NOTES, value)
             showThrottled { "Pitch Bend: ${format(value)}" }
         }
 
         override fun onPressure(note: Int, value: Float) {
-            engine.sendPressure(TARGET_SLOT_INDEX, note, value)
+            engine.sendPressure(engine.noteTargetSlot, note, value)
             showThrottled {
                 val target = if (note >= 0) {
                     MidiControllerManager.getNoteName(note)
@@ -104,7 +103,7 @@ class MidiDeviceController(
         }
 
         override fun onControlChange(controller: Int, value: Float) {
-            engine.sendControlChange(TARGET_SLOT_INDEX, controller, value)
+            engine.sendControlChange(engine.noteTargetSlot, controller, value)
             showThrottled { "CC #$controller: ${(value * MIDI_7BIT_MAX).toInt()}" }
         }
 
