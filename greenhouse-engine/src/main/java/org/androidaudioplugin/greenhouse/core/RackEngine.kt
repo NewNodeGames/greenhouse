@@ -38,8 +38,8 @@ class RackEngine(
         const val EFFECT_SLOTS_PER_TRACK = 2
         const val INSTRUMENT_SLOT_IN_TRACK = 0
         const val SLOTS_PER_TRACK = INSTRUMENT_SLOT_IN_TRACK + 1 + EFFECT_SLOTS_PER_TRACK
-        const val MAX_TRACKS = 8
-        const val DEFAULT_NUM_TRACKS = 4
+        const val MAX_TRACKS = 16
+        const val DEFAULT_NUM_TRACKS = 16
         private const val STEREO_CHANNELS = 2
         const val DEFAULT_NUM_RACK_SLOTS = DEFAULT_NUM_TRACKS * SLOTS_PER_TRACK
 
