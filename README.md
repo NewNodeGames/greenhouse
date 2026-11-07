@@ -4,6 +4,8 @@
 
 **Greenhouse** is an open-source Android midi sequencer and host application for testing and playing **[Audio Plugins for Android (AAP)](https://github.com/atsushieno/aap-core)** in real time.
 
+This fork is the original greenhouse app modified adding multitrack system, arrangement and piano roll editor. Work in progress, use only for testing;)
+
 <p align="center">
   <img src="./docs/images/greenhouse.png" alt="Greenhouse Screenshot" width="360" />
 </p>
