@@ -14,7 +14,7 @@ namespace greenhouse
 constexpr int32_t EFFECT_SLOTS_PER_TRACK = 2;
 constexpr int32_t INSTRUMENT_SLOT_IN_TRACK = 0;
 constexpr int32_t SLOTS_PER_TRACK = INSTRUMENT_SLOT_IN_TRACK + 1 + EFFECT_SLOTS_PER_TRACK;
-constexpr int32_t MAX_TRACKS = 8;
+constexpr int32_t MAX_TRACKS = 16;
 constexpr int32_t MAX_RACK_SLOTS = MAX_TRACKS * SLOTS_PER_TRACK;
 
 constexpr int32_t getTrackOfSlot(int32_t slotIndex)
